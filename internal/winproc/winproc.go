@@ -1,0 +1,421 @@
+//go:build windows
+
+// Package winproc launches and controls server processes.
+//
+// It exists because os/exec cannot do what is needed here: syscall.SysProcAttr
+// exposes no way to attach a proc-thread attribute list, which is required to
+// hand a process a pseudo console, and no way to start suspended and place the
+// process in a Job Object before its first instruction runs.
+//
+// That last point is a correctness requirement rather than a nicety. A process
+// assigned to a job only after it starts may already have spawned children, and
+// those children are outside the job — beyond its resource limits and beyond the
+// reach of TerminateJobObject. Every process here is created suspended, assigned,
+// and only then resumed.
+package winproc
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/pterodactyl/wings/internal/jobobject"
+)
+
+// procThreadAttributePseudoConsole is PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+// which golang.org/x/sys/windows does not export.
+const procThreadAttributePseudoConsole = 0x00020016
+
+// Config describes a process to launch.
+type Config struct {
+	// Argv is the command and its arguments, already split. Argv[0] is the
+	// executable.
+	//
+	// Splitting is the caller's responsibility precisely so that no shell is
+	// involved: see ParseCommandLine.
+	Argv []string
+
+	// Dir is the working directory. Required.
+	Dir string
+
+	// Env is the environment, as "KEY=VALUE" strings.
+	Env []string
+
+	// Token, when non-zero, runs the process as that account. Zero runs it as
+	// the account the worker itself runs as.
+	Token windows.Token
+
+	// PseudoConsole allocates a ConPTY rather than plain pipes.
+	//
+	// Needed by processes that check whether stdout is a character device and
+	// change behaviour when it is not — steamcmd being the common example, which
+	// mangles or drops progress output when handed a pipe. The cost is that
+	// output arrives as a VT stream with escape sequences and cursor movement
+	// rather than clean lines, so enable it per-egg rather than globally.
+	PseudoConsole bool
+
+	// Cols and Rows size the pseudo console. Ignored without PseudoConsole.
+	Cols, Rows uint16
+}
+
+// Process is a running server process.
+type Process struct {
+	Pid int
+
+	proc   windows.Handle
+	thread windows.Handle
+	pty    windows.Handle
+
+	stdin  *os.File
+	output *os.File
+
+	// ptyClosers holds the handles that must outlive process creation and be
+	// released afterwards.
+	ptyClosers []windows.Handle
+}
+
+// ParseCommandLine splits a command line string into argv using the same rules
+// as CommandLineToArgvW.
+//
+// This is how an egg's startup string becomes an argv. Upstream wings never had
+// to do this: it set STARTUP as an environment variable and the Docker image's
+// entrypoint ran it through a shell. There is no entrypoint here, and routing a
+// partly user-controlled string through cmd.exe would execute it with the
+// server account's full privileges on the host.
+//
+// A consequence worth knowing: shell operators (&&, |, >, subshells) are not
+// interpreted. A startup line that relies on them will not work and needs
+// rewriting in the egg's Windows profile.
+func ParseCommandLine(cmdline string) ([]string, error) {
+	argv, err := windows.DecomposeCommandLine(cmdline)
+	if err != nil {
+		return nil, fmt.Errorf("winproc: parse command line: %w", err)
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("winproc: command line is empty")
+	}
+	return argv, nil
+}
+
+// Start launches the process and places it in job before it runs.
+func Start(cfg Config, job *jobobject.Job) (p *Process, err error) {
+	if len(cfg.Argv) == 0 {
+		return nil, fmt.Errorf("winproc: no command specified")
+	}
+	if cfg.Dir == "" {
+		return nil, fmt.Errorf("winproc: no working directory specified")
+	}
+
+	p = &Process{}
+	defer func() {
+		if err != nil {
+			p.closeAll()
+		}
+	}()
+
+	var si windows.StartupInfoEx
+	si.Cb = uint32(unsafe.Sizeof(si))
+
+	flags := uint32(windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_SUSPENDED)
+
+	var attrList *windows.ProcThreadAttributeListContainer
+
+	if cfg.PseudoConsole {
+		if err = p.setupPseudoConsole(cfg, &si); err != nil {
+			return nil, err
+		}
+		attrList, err = windows.NewProcThreadAttributeList(1)
+		if err != nil {
+			return nil, fmt.Errorf("winproc: attribute list: %w", err)
+		}
+		defer attrList.Delete()
+
+		if err = attrList.Update(
+			procThreadAttributePseudoConsole,
+			unsafe.Pointer(&p.pty),
+			unsafe.Sizeof(p.pty),
+		); err != nil {
+			return nil, fmt.Errorf("winproc: attach pseudo console: %w", err)
+		}
+		si.ProcThreadAttributeList = attrList.List()
+		flags |= windows.EXTENDED_STARTUPINFO_PRESENT
+	} else {
+		if err = p.setupPipes(&si); err != nil {
+			return nil, err
+		}
+		// A distinct process group is what makes GenerateConsoleCtrlEvent able to
+		// target this process specifically. Not available alongside a pseudo
+		// console, which is why CtrlBreak reports as unsupported in that mode.
+		flags |= windows.CREATE_NEW_PROCESS_GROUP
+	}
+
+	cmdline := windows.ComposeCommandLine(cfg.Argv)
+	argv0, err := windows.UTF16PtrFromString(cfg.Argv[0])
+	if err != nil {
+		return nil, fmt.Errorf("winproc: executable path: %w", err)
+	}
+	cmdlinePtr, err := windows.UTF16PtrFromString(cmdline)
+	if err != nil {
+		return nil, fmt.Errorf("winproc: command line: %w", err)
+	}
+	dirPtr, err := windows.UTF16PtrFromString(cfg.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("winproc: working directory: %w", err)
+	}
+	envBlock, err := buildEnvBlock(cfg.Env)
+	if err != nil {
+		return nil, err
+	}
+
+	var pi windows.ProcessInformation
+
+	// A pseudo console supplies the child's handles through the attribute list,
+	// not through inheritance. Passing bInheritHandles=TRUE alongside it causes
+	// the console to never attach and the child to produce no output at all.
+	inheritHandles := !cfg.PseudoConsole
+
+	if cfg.Token != 0 {
+		err = windows.CreateProcessAsUser(
+			cfg.Token, argv0, cmdlinePtr,
+			nil, nil, inheritHandles, flags,
+			envBlock, dirPtr, &si.StartupInfo, &pi,
+		)
+	} else {
+		err = windows.CreateProcess(
+			argv0, cmdlinePtr,
+			nil, nil, inheritHandles, flags,
+			envBlock, dirPtr, &si.StartupInfo, &pi,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("winproc: create process %q: %w", cfg.Argv[0], err)
+	}
+
+	p.Pid = int(pi.ProcessId)
+	p.proc = pi.Process
+	p.thread = pi.Thread
+
+	// Release the ends of the pipes now owned by the child, so that reads see
+	// EOF when the child exits rather than hanging on our own dangling handle.
+	p.releaseChildHandles()
+
+	// Assign before resuming: this is the window in which a process could
+	// otherwise spawn children outside the job.
+	if job != nil {
+		if err = job.Assign(p.proc); err != nil {
+			_ = windows.TerminateProcess(p.proc, 1)
+			return nil, err
+		}
+	}
+
+	if _, err = windows.ResumeThread(p.thread); err != nil {
+		_ = windows.TerminateProcess(p.proc, 1)
+		return nil, fmt.Errorf("winproc: resume: %w", err)
+	}
+
+	return p, nil
+}
+
+// setupPseudoConsole creates a ConPTY and the pipes feeding it.
+func (p *Process) setupPseudoConsole(cfg Config, si *windows.StartupInfoEx) error {
+	var inRead, inWrite, outRead, outWrite windows.Handle
+
+	if err := windows.CreatePipe(&inRead, &inWrite, nil, 0); err != nil {
+		return fmt.Errorf("winproc: pty input pipe: %w", err)
+	}
+	if err := windows.CreatePipe(&outRead, &outWrite, nil, 0); err != nil {
+		_ = windows.CloseHandle(inRead)
+		_ = windows.CloseHandle(inWrite)
+		return fmt.Errorf("winproc: pty output pipe: %w", err)
+	}
+
+	cols, rows := cfg.Cols, cfg.Rows
+	if cols == 0 {
+		cols = 200
+	}
+	if rows == 0 {
+		rows = 50
+	}
+
+	size := windows.Coord{X: int16(cols), Y: int16(rows)}
+	if err := windows.CreatePseudoConsole(size, inRead, outWrite, 0, &p.pty); err != nil {
+		for _, h := range []windows.Handle{inRead, inWrite, outRead, outWrite} {
+			_ = windows.CloseHandle(h)
+		}
+		return fmt.Errorf("winproc: create pseudo console: %w", err)
+	}
+
+	// The pseudo console duplicated these; our copies must go or the child will
+	// never see EOF.
+	_ = windows.CloseHandle(inRead)
+	_ = windows.CloseHandle(outWrite)
+
+	p.stdin = os.NewFile(uintptr(inWrite), "conpty-stdin")
+	p.output = os.NewFile(uintptr(outRead), "conpty-output")
+
+	// A pseudo console supplies the child's handles; STARTUPINFO must not.
+	si.Flags = 0
+	return nil
+}
+
+// setupPipes wires plain anonymous pipes for stdin and a merged stdout/stderr.
+//
+// Output is merged deliberately. Game servers interleave the two and the Panel
+// presents a single console, so keeping them separate would only create an
+// ordering problem to solve later.
+func (p *Process) setupPipes(si *windows.StartupInfoEx) error {
+	sa := &windows.SecurityAttributes{InheritHandle: 1}
+	sa.Length = uint32(unsafe.Sizeof(*sa))
+
+	var inRead, inWrite, outRead, outWrite windows.Handle
+
+	if err := windows.CreatePipe(&inRead, &inWrite, sa, 0); err != nil {
+		return fmt.Errorf("winproc: stdin pipe: %w", err)
+	}
+	if err := windows.CreatePipe(&outRead, &outWrite, sa, 0); err != nil {
+		_ = windows.CloseHandle(inRead)
+		_ = windows.CloseHandle(inWrite)
+		return fmt.Errorf("winproc: stdout pipe: %w", err)
+	}
+
+	// Our ends must not be inherited, or the child holds a copy and the pipe
+	// never reports EOF.
+	for _, h := range []windows.Handle{inWrite, outRead} {
+		if err := windows.SetHandleInformation(h, windows.HANDLE_FLAG_INHERIT, 0); err != nil {
+			return fmt.Errorf("winproc: clear inherit flag: %w", err)
+		}
+	}
+
+	si.Flags |= windows.STARTF_USESTDHANDLES
+	si.StdInput = inRead
+	si.StdOutput = outWrite
+	si.StdErr = outWrite
+
+	p.stdin = os.NewFile(uintptr(inWrite), "stdin")
+	p.output = os.NewFile(uintptr(outRead), "output")
+	p.ptyClosers = append(p.ptyClosers, inRead, outWrite)
+
+	return nil
+}
+
+// releaseChildHandles closes the pipe ends the child now owns.
+func (p *Process) releaseChildHandles() {
+	for _, h := range p.ptyClosers {
+		_ = windows.CloseHandle(h)
+	}
+	p.ptyClosers = nil
+}
+
+// Stdin returns the writer feeding the process's standard input.
+func (p *Process) Stdin() io.WriteCloser { return p.stdin }
+
+// Output returns the reader carrying the process's combined output.
+//
+// In pseudo console mode this is a VT stream: it carries escape sequences,
+// cursor positioning and carriage-return redraws, not clean lines.
+func (p *Process) Output() io.ReadCloser { return p.output }
+
+// Wait blocks until the process exits and returns its exit code.
+func (p *Process) Wait() (uint32, error) {
+	if _, err := windows.WaitForSingleObject(p.proc, windows.INFINITE); err != nil {
+		return 0, fmt.Errorf("winproc: wait: %w", err)
+	}
+	var code uint32
+	if err := windows.GetExitCodeProcess(p.proc, &code); err != nil {
+		return 0, fmt.Errorf("winproc: exit code: %w", err)
+	}
+	return code, nil
+}
+
+// CtrlBreak sends CTRL_BREAK_EVENT to the process group.
+//
+// This is the nearest thing Windows has to SIGTERM and it is not a close match.
+// CTRL_C_EVENT cannot be directed at a specific process group at all, so only
+// break is available; it reaches everything sharing the console; and many game
+// servers install no handler for it and die uncleanly, which is no better than a
+// kill. Treat it as a fallback between a stdin stop command and terminating the
+// job, never as the primary path.
+func (p *Process) CtrlBreak() error {
+	if p.pty != 0 {
+		return fmt.Errorf("winproc: ctrl-break unavailable in pseudo console mode")
+	}
+	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(p.Pid)); err != nil {
+		return fmt.Errorf("winproc: ctrl-break: %w", err)
+	}
+	return nil
+}
+
+// Resize changes the pseudo console dimensions. No-op without one.
+func (p *Process) Resize(cols, rows uint16) error {
+	if p.pty == 0 {
+		return nil
+	}
+	if err := windows.ResizePseudoConsole(p.pty, windows.Coord{X: int16(cols), Y: int16(rows)}); err != nil {
+		return fmt.Errorf("winproc: resize pseudo console: %w", err)
+	}
+	return nil
+}
+
+// Kill terminates just this process. Prefer terminating the Job Object, which
+// takes down the whole tree.
+func (p *Process) Kill() error {
+	if p.proc == 0 {
+		return nil
+	}
+	return windows.TerminateProcess(p.proc, 1)
+}
+
+// Close releases every handle held for the process.
+func (p *Process) Close() error {
+	p.closeAll()
+	return nil
+}
+
+func (p *Process) closeAll() {
+	p.releaseChildHandles()
+
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+		p.stdin = nil
+	}
+	if p.output != nil {
+		_ = p.output.Close()
+		p.output = nil
+	}
+	// The pseudo console must be closed after its pipes, or ClosePseudoConsole
+	// blocks waiting to flush into a reader that no longer exists.
+	if p.pty != 0 {
+		windows.ClosePseudoConsole(p.pty)
+		p.pty = 0
+	}
+	if p.thread != 0 {
+		_ = windows.CloseHandle(p.thread)
+		p.thread = 0
+	}
+	if p.proc != 0 {
+		_ = windows.CloseHandle(p.proc)
+		p.proc = 0
+	}
+}
+
+// buildEnvBlock converts "KEY=VALUE" strings into the doubly-NUL-terminated
+// UTF-16 block CreateProcess expects.
+func buildEnvBlock(env []string) (*uint16, error) {
+	if len(env) == 0 {
+		return nil, nil
+	}
+
+	var block []uint16
+	for _, e := range env {
+		u, err := windows.UTF16FromString(e)
+		if err != nil {
+			return nil, fmt.Errorf("winproc: environment entry %q: %w", e, err)
+		}
+		block = append(block, u...)
+	}
+	block = append(block, 0)
+	return &block[0], nil
+}

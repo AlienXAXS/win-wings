@@ -1,26 +1,24 @@
+//go:build windows
+
 package server
 
 import (
-	"bufio"
 	"context"
+	"fmt"
 	"html/template"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/client"
 
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/environment/docker"
+	"github.com/pterodactyl/wings/internal/jobobject"
+	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/remote"
 	"github.com/pterodactyl/wings/system"
 )
@@ -28,9 +26,6 @@ import (
 // Install executes the installation stack for a server process. Bubbles any
 // errors up to the calling function which should handle contacting the panel to
 // notify it of the server state.
-//
-// Pass true as the first argument in order to execute a server sync before the
-// process to ensure the latest information is used.
 func (s *Server) Install() error {
 	return s.install(false)
 }
@@ -52,15 +47,9 @@ func (s *Server) install(reinstall bool) error {
 	s.Log().WithField("was_successful", err == nil).Debug("notifying panel of server install state")
 	if serr := s.SyncInstallState(err == nil, reinstall); serr != nil {
 		l := s.Log().WithField("was_successful", err == nil)
-
-		// If the request was successful but there was an error with this request,
-		// attach the error to this log entry. Otherwise, ignore it in this log
-		// since whatever is calling this function should handle the error and
-		// will end up logging the same one.
 		if err == nil {
 			l.WithField("error", err)
 		}
-
 		l.Warn("failed to notify panel of server install state")
 	}
 
@@ -114,28 +103,24 @@ func (s *Server) internalInstall() error {
 	return nil
 }
 
+// InstallationProcess runs an egg's installation script for a server.
+//
+// Upstream executed the script inside a throwaway Docker container built from
+// the egg's container_image, with the server's files bind-mounted at
+// /mnt/server. There is no container here: the script is PowerShell, run
+// directly on the host inside a Job Object that bounds what it can consume.
+//
+// That difference is why every egg needs a Windows-specific install script. The
+// Panel-side Blueprint plugin supplies it; see the project documentation for the
+// API contract.
 type InstallationProcess struct {
 	Server *Server
 	Script *remote.InstallationScript
-	client *client.Client
 }
 
-// NewInstallationProcess returns a new installation process struct that will be
-// used to create containers and otherwise perform installation commands for a
-// server.
+// NewInstallationProcess returns a new installation process for a server.
 func NewInstallationProcess(s *Server, script *remote.InstallationScript) (*InstallationProcess, error) {
-	proc := &InstallationProcess{
-		Script: script,
-		Server: s,
-	}
-
-	if c, err := environment.Docker(); err != nil {
-		return nil, err
-	} else {
-		proc.client = c
-	}
-
-	return proc, nil
+	return &InstallationProcess{Server: s, Script: script}, nil
 }
 
 // IsInstalling returns if the server is actively running the installation
@@ -177,22 +162,7 @@ func (s *Server) IsInProtectedState() bool {
 	return s.IsInstalling() || s.IsTransferring() || s.IsRestoring()
 }
 
-// RemoveContainer removes the installation container for the server.
-func (ip *InstallationProcess) RemoveContainer() error {
-	err := ip.client.ContainerRemove(ip.Server.Context(), ip.Server.ID()+"_installer", container.RemoveOptions{
-		RemoveVolumes: true,
-		Force:         true,
-	})
-	if err != nil && !client.IsErrNotFound(err) {
-		return err
-	}
-	return nil
-}
-
-// Run runs the installation process, this is done as in a background thread.
-// This will configure the required environment, and then spin up the
-// installation container. Once the container finishes installing the results
-// are stored in an installation log in the server's configuration directory.
+// Run executes the installation process.
 func (ip *InstallationProcess) Run() error {
 	ip.Server.Log().Debug("acquiring installation process lock")
 	if !ip.Server.installing.SwapIf(true) {
@@ -200,9 +170,6 @@ func (ip *InstallationProcess) Run() error {
 	}
 	ip.Server.Sftp().CancelAll()
 
-	// We now have an exclusive lock on this installation process. Ensure that whenever this
-	// process is finished that the semaphore is released so that other processes and be executed
-	// without encountering a wait timeout.
 	defer func() {
 		ip.Server.Log().Debug("releasing installation process lock")
 		ip.Server.installing.Store(false)
@@ -212,147 +179,80 @@ func (ip *InstallationProcess) Run() error {
 		return err
 	}
 
-	cID, err := ip.Execute()
-	if err != nil {
-		_ = ip.RemoveContainer()
-		return err
+	output, execErr := ip.Execute()
+
+	// Write the log regardless of the outcome — a failed install is exactly when
+	// the operator needs to read it.
+	if err := ip.AfterExecute(output); err != nil {
+		ip.Server.Log().WithField("error", err).Warn("failed to write installation log")
 	}
 
-	// If this step fails, log a warning but don't exit out of the process. This is completely
-	// internal to the daemon's functionality, and does not affect the status of the server itself.
-	if err := ip.AfterExecute(cID); err != nil {
-		ip.Server.Log().WithField("error", err).Warn("failed to complete after-execute step of installation process")
-	}
-
-	return nil
+	return execErr
 }
 
-// Returns the location of the temporary data for the installation process.
+// tempDir is where the installation script is staged.
+//
+// Deliberately not inside the server's own data directory: the script is
+// authored by an administrator and is what the installer executes, so a server
+// able to rewrite it before execution would gain arbitrary code execution.
 func (ip *InstallationProcess) tempDir() string {
 	return filepath.Join(config.Get().System.TmpDirectory, ip.Server.ID())
 }
 
-// Writes the installation script to a temporary file on the host machine so that it
-// can be properly mounted into the installation container and then executed.
+func (ip *InstallationProcess) scriptPath() string {
+	return filepath.Join(ip.tempDir(), "install.ps1")
+}
+
+// writeScriptToDisk stages the installation script.
 func (ip *InstallationProcess) writeScriptToDisk() error {
-	// Make sure the temp directory root exists before trying to make a directory within it. The
-	// os.TempDir call expects this base to exist, it won't create it for you.
 	if err := os.MkdirAll(ip.tempDir(), 0o700); err != nil {
 		return errors.WithMessage(err, "could not create temporary directory for install process")
 	}
-	f, err := os.OpenFile(filepath.Join(ip.tempDir(), "install.sh"), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+
+	// PowerShell is content with either line ending, but normalising to CRLF
+	// avoids surprises in here-strings within scripts authored on Windows.
+	body := strings.ReplaceAll(ip.Script.Script, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\n", "\r\n")
+
+	f, err := os.OpenFile(ip.scriptPath(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return errors.WithMessage(err, "failed to write server installation script to disk before mount")
+		return errors.WithMessage(err, "failed to write server installation script to disk")
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, strings.NewReader(strings.ReplaceAll(ip.Script.Script, "\r\n", "\n"))); err != nil {
+
+	if _, err := io.Copy(f, strings.NewReader(body)); err != nil {
 		return err
 	}
 	return nil
 }
 
-// Pulls the docker image to be used for the installation container.
-func (ip *InstallationProcess) pullInstallationImage() error {
-	registry, registryAuth := config.Get().Docker.RegistryCredentialsForImage(ip.Script.ContainerImage)
-	if registryAuth != nil {
-		log.WithField("registry", registry).Debug("using authentication for registry")
-	}
-
-	// Get the ImagePullOptions.
-	imagePullOptions := image.PullOptions{All: false}
-	if registryAuth != nil {
-		b64, err := registryAuth.Base64()
-		if err != nil {
-			log.WithError(err).Error("failed to get registry auth credentials")
-		}
-
-		// b64 is a string so if there is an error it will just be empty, not nil.
-		imagePullOptions.RegistryAuth = b64
-	}
-
-	r, err := ip.client.ImagePull(ip.Server.Context(), ip.Script.ContainerImage, imagePullOptions)
-	if err != nil {
-		images, ierr := ip.client.ImageList(ip.Server.Context(), image.ListOptions{})
-		if ierr != nil {
-			// Well damn, something has gone really wrong here, just go ahead and abort there
-			// isn't much anything we can do to try and self-recover from this.
-			return ierr
-		}
-
-		for _, img := range images {
-			for _, t := range img.RepoTags {
-				if t != ip.Script.ContainerImage {
-					continue
-				}
-
-				log.WithFields(log.Fields{
-					"image": ip.Script.ContainerImage,
-					"err":   err.Error(),
-				}).Warn("unable to pull requested image from remote source, however the image exists locally")
-
-				// Okay, we found a matching container image, in that case just go ahead and return
-				// from this function, since there is nothing else we need to do here.
-				return nil
-			}
-		}
-
-		return err
-	}
-	defer r.Close()
-
-	log.WithField("image", ip.Script.ContainerImage).Debug("pulling docker image... this could take a bit of time")
-
-	// Block continuation until the image has been pulled successfully.
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		log.Debug(scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// BeforeExecute runs before the container is executed. This pulls down the
-// required docker container image as well as writes the installation script to
-// the disk. This process is executed in an async manner, if either one fails
-// the error is returned.
+// BeforeExecute prepares the installation environment.
 func (ip *InstallationProcess) BeforeExecute() error {
 	if err := ip.writeScriptToDisk(); err != nil {
 		return errors.WithMessage(err, "failed to write installation script to disk")
 	}
-	if err := ip.pullInstallationImage(); err != nil {
-		return errors.WithMessage(err, "failed to pull updated installation container image for server")
+	// The server's data directory must exist; the script writes into it.
+	if err := os.MkdirAll(ip.Server.Filesystem().Path(), 0o700); err != nil {
+		return errors.WithMessage(err, "failed to create server data directory for install process")
 	}
-	if err := ip.RemoveContainer(); err != nil {
-		return errors.WithMessage(err, "failed to remove existing install container for server")
+	if err := os.MkdirAll(filepath.Dir(ip.GetLogPath()), 0o700); err != nil {
+		return errors.WithMessage(err, "failed to create install log directory")
 	}
 	return nil
 }
 
 // GetLogPath returns the log path for the installation process.
 func (ip *InstallationProcess) GetLogPath() string {
-	return filepath.Join(config.Get().System.LogDirectory, "/install", ip.Server.ID()+".log")
+	return filepath.Join(config.Get().System.LogDirectory, "install", ip.Server.ID()+".log")
 }
 
-// AfterExecute cleans up after the execution of the installation process.
-// This grabs the logs from the process to store in the server configuration
-// directory, and then destroys the associated installation container.
-func (ip *InstallationProcess) AfterExecute(containerId string) error {
-	defer ip.RemoveContainer()
-
-	ip.Server.Log().WithField("container_id", containerId).Debug("pulling installation logs for server")
-	reader, err := ip.client.ContainerLogs(ip.Server.Context(), containerId, container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-		Follow:     false,
-	})
-
-	if err != nil && !client.IsErrNotFound(err) {
-		return err
-	}
+// AfterExecute writes the installation log.
+func (ip *InstallationProcess) AfterExecute(output string) error {
+	defer func() {
+		// The staged script may contain credentials substituted from egg
+		// variables, so it does not outlive the install.
+		_ = os.RemoveAll(ip.tempDir())
+	}()
 
 	f, err := os.OpenFile(ip.GetLogPath(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -360,19 +260,16 @@ func (ip *InstallationProcess) AfterExecute(containerId string) error {
 	}
 	defer f.Close()
 
-	// We write the contents of the container output to a more "permanent" file so that they
-	// can be referenced after this container is deleted. We'll also include the environment
-	// variables passed into the container to make debugging things a little easier.
-	ip.Server.Log().WithField("path", ip.GetLogPath()).Debug("writing most recent installation logs to disk")
+	ip.Server.Log().WithField("path", ip.GetLogPath()).Debug("writing installation log to disk")
 
-	tmpl, err := template.New("header").Parse(`Pterodactyl Server Installation Log
+	tmpl, err := template.New("header").Parse(`win-wings Server Installation Log
 
 |
 | Details
 | ------------------------------
-  Server UUID:          {{.Server.ID}}
-  Container Image:      {{.Script.ContainerImage}}
-  Container Entrypoint: {{.Script.Entrypoint}}
+  Server UUID:   {{.Server.ID}}
+  Runtime:       {{.Script.ContainerImage}}
+  Interpreter:   powershell.exe
 
 |
 | Environment Variables
@@ -387,180 +284,173 @@ func (ip *InstallationProcess) AfterExecute(containerId string) error {
 	if err != nil {
 		return err
 	}
-
 	if err := tmpl.Execute(f, ip); err != nil {
 		return err
 	}
 
-	if _, err := io.Copy(f, reader); err != nil {
-		return err
-	}
-
-	return nil
+	_, err = io.WriteString(f, output)
+	return err
 }
 
-// Execute executes the installation process inside a specially created docker
-// container.
-func (ip *InstallationProcess) Execute() (string, error) {
-	// Create a child context that is canceled once this function is done running. This
-	// will also be canceled if the parent context (from the Server struct) is canceled
-	// which occurs if the server is deleted.
-	ctx, cancel := context.WithCancel(ip.Server.Context())
-	defer cancel()
+// installEnvironment returns the environment handed to the install script.
+func (ip *InstallationProcess) installEnvironment() []string {
+	env := ip.Server.GetEnvironmentVariables()
 
-	conf := &container.Config{
-		Hostname:     "installer",
-		AttachStdout: true,
-		AttachStderr: true,
-		AttachStdin:  true,
-		OpenStdin:    true,
-		Tty:          true,
-		Cmd:          []string{ip.Script.Entrypoint, "/mnt/install/install.sh"},
-		Image:        ip.Script.ContainerImage,
-		Env:          ip.Server.GetEnvironmentVariables(),
-		Labels: map[string]string{
-			"Service":       "Pterodactyl",
-			"ContainerType": "server_installer",
-		},
-	}
-
-	cfg := config.Get()
-	tmpfsSize := strconv.Itoa(int(cfg.Docker.TmpfsSize))
-	hostConf := &container.HostConfig{
-		Mounts: []mount.Mount{
-			{
-				Target:   "/mnt/server",
-				Source:   ip.Server.Filesystem().Path(),
-				Type:     mount.TypeBind,
-				ReadOnly: false,
-			},
-			{
-				Target:   "/mnt/install",
-				Source:   ip.tempDir(),
-				Type:     mount.TypeBind,
-				ReadOnly: false,
-			},
-		},
-		Resources: ip.resourceLimits(),
-		Tmpfs: map[string]string{
-			"/tmp": "rw,exec,nosuid,size=" + tmpfsSize + "M",
-		},
-		DNS:         cfg.Docker.Network.Dns,
-		LogConfig:   cfg.Docker.ContainerLogConfig(),
-		NetworkMode: container.NetworkMode(cfg.Docker.Network.Mode),
-		UsernsMode:  container.UsernsMode(cfg.Docker.UsernsMode),
-	}
-
-	// Ensure the root directory for the server exists properly before attempting
-	// to trigger the reinstall of the server. It is possible the directory would
-	// not exist when this runs if Wings boots with a missing directory and a user
-	// triggers a reinstall before trying to start the server.
-	if err := ip.Server.EnsureDataDirectoryExists(); err != nil {
-		return "", err
-	}
-
-	ip.Server.Log().WithField("install_script", ip.tempDir()+"/install.sh").Info("creating install container for server process")
-	// Remove the temporary directory when the installation process finishes for this server container.
-	defer func() {
-		if err := os.RemoveAll(ip.tempDir()); err != nil {
-			if !os.IsNotExist(err) {
-				ip.Server.Log().WithField("error", err).Warn("failed to remove temporary data directory after install process")
-			}
-		}
-	}()
-
-	r, err := ip.client.ContainerCreate(ctx, conf, hostConf, nil, nil, ip.Server.ID()+"_installer")
-	if err != nil {
-		return "", err
-	}
-
-	ip.Server.Log().WithField("container_id", r.ID).Info("running installation script for server in container")
-	if err := ip.client.ContainerStart(ctx, r.ID, container.StartOptions{}); err != nil {
-		return "", err
-	}
-
-	docker.SetCpuBurst(ctx, ip.client, r.ID, hostConf.Resources.CPUQuota)
-
-	// Process the install event in the background by listening to the stream output until the
-	// container has stopped, at which point we'll disconnect from it.
-	//
-	// If there is an error during the streaming output just report it and do nothing else, the
-	// install can still run, the console just won't have any output.
-	go func(id string) {
-		ip.Server.Events().Publish(DaemonMessageEvent, "Starting installation process, this could take a few minutes...")
-		if err := ip.StreamOutput(ctx, id); err != nil {
-			ip.Server.Log().WithField("error", err).Warn("error connecting to server install stream output")
-		}
-	}(r.ID)
-
-	sChan, eChan := ip.client.ContainerWait(ctx, r.ID, container.WaitConditionNotRunning)
-	select {
-	case err := <-eChan:
-		// Once the container has stopped running we can mark the install process as being completed.
-		if err == nil {
-			ip.Server.Events().Publish(DaemonMessageEvent, "Installation process completed.")
-		} else {
-			return "", err
-		}
-	case <-sChan:
-	}
-
-	return r.ID, nil
+	// SERVER_DIR replaces the /mnt/server bind mount that Linux eggs write into.
+	// It is also the script's working directory, so a script can use either.
+	env = append(env, "SERVER_DIR="+ip.Server.Filesystem().Path())
+	env = append(env, "INSTALL_RUNTIME="+ip.Script.ContainerImage)
+	return env
 }
 
-// StreamOutput streams the output of the installation process to a log file in
-// the server configuration directory, as well as to a websocket listener so
-// that the process can be viewed in the panel by administrators.
-func (ip *InstallationProcess) StreamOutput(ctx context.Context, id string) error {
-	opts := container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: true}
-	reader, err := ip.client.ContainerLogs(ctx, id, opts)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-
-	err = system.ScanReader(reader, ip.Server.Sink(system.InstallSink).Push)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		ip.Server.Log().WithFields(log.Fields{"container_id": id, "error": err}).Warn("error processing install output lines")
-	}
-	return nil
-}
-
-// resourceLimits returns resource limits for the installation container. This
-// looks at the globally defined install container limits and attempts to use
-// the higher of the two (defined limits & server limits). This allows for servers
-// with super low limits (e.g. Discord bots with 128Mb of memory) to perform more
-// intensive installation processes if needed.
+// resourceLimits bounds the install process.
 //
-// This also avoids a server with limits such as 4GB of memory from accidentally
-// consuming 2-5x the defined limits during the install process and causing
-// system instability.
-func (ip *InstallationProcess) resourceLimits() container.Resources {
-	limits := config.Get().Docker.InstallerLimits
+// Uses the higher of the node's configured installer limits and the server's own
+// build limits, so a small server can still run an intensive install while a
+// large one cannot consume several times its allocation during setup.
+func (ip *InstallationProcess) resourceLimits() jobobject.Limits {
+	limits := config.Get().Runtime.InstallerLimits
 
-	// Create a copy of the configuration, so we're not accidentally making
-	// changes to the underlying server build data.
 	c := *ip.Server.Config()
 	cfg := c.Build
 	if cfg.MemoryLimit < limits.Memory {
 		cfg.MemoryLimit = limits.Memory
 	}
-	// Only apply the CPU limit if neither one is currently set to unlimited. If the
-	// installer CPU limit is unlimited don't even waste time with the logic, just
-	// set the config to unlimited for this.
 	if limits.Cpu == 0 {
 		cfg.CpuLimit = 0
 	} else if cfg.CpuLimit != 0 && cfg.CpuLimit < limits.Cpu {
 		cfg.CpuLimit = limits.Cpu
 	}
 
-	resources := cfg.AsContainerResources()
-	// Explicitly remove the PID limits for the installation container. These scripts are
-	// defined at an administrative level and users can't manually execute things like a
-	// fork bomb during this process.
-	resources.PidsLimit = nil
+	l := cfg.AsJobLimits()
 
-	return resources
+	// No process cap during installation. These scripts are administrator
+	// authored, frequently invoke build tooling that fans out widely, and a user
+	// cannot execute arbitrary code here.
+	return jobobject.Limits{
+		MemoryBytes:  l.MemoryBytes,
+		CpuRate:      l.CpuRate,
+		CpuHardCap:   l.CpuHardCap,
+		AffinityMask: l.AffinityMask,
+		ProcessLimit: 0,
+	}
+}
+
+// Execute runs the installation script and returns its combined output.
+func (ip *InstallationProcess) Execute() (string, error) {
+	ctx, cancel := context.WithCancel(ip.Server.Context())
+	defer cancel()
+
+	job, err := jobobject.Create()
+	if err != nil {
+		return "", errors.WrapIf(err, "install: failed to create job object")
+	}
+	defer job.Close()
+
+	if err := job.SetLimits(ip.resourceLimits()); err != nil {
+		return "", errors.WrapIf(err, "install: failed to apply installer resource limits")
+	}
+
+	powershell, err := powershellPath()
+	if err != nil {
+		return "", err
+	}
+
+	// -ExecutionPolicy Bypass is scoped to this process only and is required
+	// because the script is generated rather than signed. -NonInteractive and
+	// -NoProfile keep a script from stalling on a prompt or inheriting operator
+	// profile state.
+	argv := []string{
+		powershell,
+		"-NoProfile",
+		"-NonInteractive",
+		"-NoLogo",
+		"-ExecutionPolicy", "Bypass",
+		"-File", ip.scriptPath(),
+	}
+
+	username, password := config.Get().System.Account.For(ip.Server.ID())
+
+	cfg := winproc.Config{
+		Argv: argv,
+		Dir:  ip.Server.Filesystem().Path(),
+		Env:  ip.installEnvironment(),
+	}
+	if username != "" {
+		token, err := winproc.LogonUser(username, password)
+		if err != nil {
+			return "", errors.WrapIf(err, "install: failed to log on the server's install account")
+		}
+		defer token.Close()
+		cfg.Token = token
+	}
+
+	ip.Server.Events().Publish(DaemonMessageEvent, "Running installation script...")
+
+	proc, err := winproc.Start(cfg, job)
+	if err != nil {
+		return "", errors.WrapIf(err, "install: failed to start installation script")
+	}
+	defer proc.Close()
+
+	// Stream output to the install sink so administrators can watch it in the
+	// Panel, while accumulating it for the log file.
+	var sb strings.Builder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sink := ip.Server.Sink(system.InstallSink)
+		_ = system.ScanReader(proc.Output(), func(line []byte) {
+			sb.Write(line)
+			sb.WriteByte('\n')
+			sink.Push(line)
+		})
+	}()
+
+	// Kill the installer if the server is deleted mid-install.
+	go func() {
+		<-ctx.Done()
+		if ctx.Err() != nil {
+			_ = job.Terminate(1)
+		}
+	}()
+
+	code, waitErr := proc.Wait()
+	<-done
+
+	if waitErr != nil {
+		return sb.String(), errors.WrapIf(waitErr, "install: failed waiting on installation script")
+	}
+	if code != 0 {
+		ip.Server.Events().Publish(DaemonMessageEvent,
+			fmt.Sprintf("Installation script exited with code %d.", code))
+		return sb.String(), errors.New(
+			fmt.Sprintf("install: installation script exited with a non-zero status: %d", code))
+	}
+
+	ip.Server.Events().Publish(DaemonMessageEvent, "Installation process completed.")
+	return sb.String(), nil
+}
+
+// powershellPath locates a PowerShell interpreter.
+//
+// Windows PowerShell 5.1 is present on every supported Windows install and is
+// used by default. PowerShell 7 is preferred when present, since egg authors are
+// more likely to target it and it handles UTF-8 far better.
+func powershellPath() (string, error) {
+	candidates := []string{
+		filepath.Join(os.Getenv("ProgramFiles"), "PowerShell", "7", "pwsh.exe"),
+		filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", errors.New("install: could not locate a PowerShell interpreter")
 }
 
 // SyncInstallState makes an HTTP request to the Panel instance notifying it that
@@ -572,3 +462,5 @@ func (s *Server) SyncInstallState(successful, reinstall bool) error {
 		Reinstall:  reinstall,
 	})
 }
+
+var _ = log.Debug

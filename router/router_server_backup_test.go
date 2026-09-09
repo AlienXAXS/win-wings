@@ -38,6 +38,14 @@ func (c backupTestRemoteClient) GetInstallationScript(context.Context, string) (
 	return remote.InstallationScript{}, nil
 }
 
+func (c backupTestRemoteClient) GetWindowsProfile(context.Context, string) (remote.WindowsProfile, error) {
+	return remote.WindowsProfile{}, remote.ErrNoWindowsProfile
+}
+
+func (c backupTestRemoteClient) CheckWindowsProfileSupport(context.Context) error {
+	return remote.ErrNoWindowsProfileAPI
+}
+
 func (c backupTestRemoteClient) GetServerConfiguration(context.Context, string) (remote.ServerConfigurationResponse, error) {
 	return remote.ServerConfigurationResponse{}, nil
 }

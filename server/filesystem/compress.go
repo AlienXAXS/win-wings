@@ -16,7 +16,7 @@ import (
 	"github.com/klauspost/compress/zip"
 	"github.com/mholt/archives"
 
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 	"github.com/pterodactyl/wings/server/filesystem/archiverext"
 )
 
@@ -29,31 +29,31 @@ import (
 // All paths are relative to the dir that is passed in as the first argument,
 // and the compressed file will be placed at that location named
 // `archive-{date}.tar.gz`.
-func (fs *Filesystem) CompressFiles(dir string, paths []string) (ufs.FileInfo, error) {
+func (fs *Filesystem) CompressFiles(dir string, paths []string) (winfs.FileInfo, error) {
 	a := &Archive{Filesystem: fs, BaseDirectory: dir, Files: paths}
 	d := path.Join(
 		dir,
 		fmt.Sprintf("archive-%s.tar.gz", strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", "")),
 	)
-	f, err := fs.unixFS.OpenFile(d, ufs.O_WRONLY|ufs.O_CREATE, 0o644)
+	f, err := fs.winFS.OpenFile(d, winfs.O_WRONLY|winfs.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	cw := ufs.NewCountedWriter(f)
+	cw := winfs.NewCountedWriter(f)
 	if err := a.Stream(context.Background(), cw); err != nil {
 		return nil, err
 	}
-	if cw.BytesWritten() < 0 || !fs.unixFS.CanFit(cw.BytesWritten()) {
-		_ = fs.unixFS.Remove(d)
+	if cw.BytesWritten() < 0 || !fs.winFS.CanFit(cw.BytesWritten()) {
+		_ = fs.winFS.Remove(d)
 		return nil, newFilesystemError(ErrCodeDiskSpace, nil)
 	}
-	fs.unixFS.Add(cw.BytesWritten())
+	fs.winFS.Add(cw.BytesWritten())
 	return f.Stat()
 }
 
 func (fs *Filesystem) archiverFileSystem(ctx context.Context, p string) (iofs.FS, io.Closer, error) {
-	f, err := fs.unixFS.Open(p)
+	f, err := fs.winFS.Open(p)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -142,7 +142,7 @@ func (fs *Filesystem) SpaceAvailableForDecompression(ctx context.Context, dir st
 				return newFilesystemError(ErrCodeDiskSpace, nil)
 			}
 			next := current + fileSize
-			if !fs.unixFS.CanFit(next) {
+			if !fs.winFS.CanFit(next) {
 				return newFilesystemError(ErrCodeDiskSpace, nil)
 			}
 			size.Store(next)
@@ -157,7 +157,7 @@ func (fs *Filesystem) SpaceAvailableForDecompression(ctx context.Context, dir st
 // zip-slip attack being attempted by validating that the final path is within
 // the server data directory.
 func (fs *Filesystem) DecompressFile(ctx context.Context, dir string, file string) error {
-	f, err := fs.unixFS.Open(filepath.Join(dir, file))
+	f, err := fs.winFS.Open(filepath.Join(dir, file))
 	if err != nil {
 		return err
 	}
@@ -233,7 +233,7 @@ func (fs *Filesystem) extractStream(ctx context.Context, opts extractStreamOptio
 		defer reader.Close()
 
 		// Open the file for creation/writing
-		f, err := fs.unixFS.OpenFile(p, ufs.O_WRONLY|ufs.O_CREATE, 0o644)
+		f, err := fs.winFS.OpenFile(p, winfs.O_WRONLY|winfs.O_CREATE, 0o644)
 		if err != nil {
 			return err
 		}

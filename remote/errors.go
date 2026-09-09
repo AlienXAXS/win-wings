@@ -62,3 +62,16 @@ type SftpInvalidCredentialsError struct{}
 func (ice SftpInvalidCredentialsError) Error() string {
 	return "the credentials provided were invalid"
 }
+
+var (
+	// ErrNoWindowsProfile indicates the Panel has no Windows profile for a
+	// server's egg. The server cannot be run: a Linux egg's install script and
+	// startup command will not work here, and guessing at them would produce a
+	// server that appears to install and then fails obscurely.
+	ErrNoWindowsProfile = errors.Sentinel("remote: no windows profile is configured for this egg")
+
+	// ErrNoWindowsProfileAPI indicates the Panel is not serving the Windows
+	// profile API at all, meaning the win-wings Blueprint plugin is missing or
+	// disabled.
+	ErrNoWindowsProfileAPI = errors.Sentinel("remote: the panel is not serving the windows profile API")
+)

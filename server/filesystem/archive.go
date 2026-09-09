@@ -18,7 +18,7 @@ import (
 
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/internal/progress"
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 const memory = 4 * 1024
@@ -105,7 +105,7 @@ func (a *Archive) Create(ctx context.Context, dst string) error {
 	return a.Stream(ctx, writer)
 }
 
-type walkFunc func(dirfd int, name, relative string, d ufs.DirEntry) error
+type walkFunc func(dir *winfs.Dir, name, relative string, d winfs.DirEntry) error
 
 // Stream streams the creation of the archive to the given writer.
 func (a *Archive) Stream(ctx context.Context, w io.Writer) error {
@@ -151,7 +151,7 @@ func (a *Archive) Stream(ctx context.Context, w io.Writer) error {
 
 	a.w = NewTarProgress(tw, a.Progress)
 
-	fs := a.Filesystem.unixFS
+	fs := a.Filesystem.winFS
 
 	// If we're specifically looking for only certain files, or have requested
 	// that certain files be ignored we'll update the callback function to reflect
@@ -159,7 +159,7 @@ func (a *Archive) Stream(ctx context.Context, w io.Writer) error {
 	var callback walkFunc
 	if len(a.Files) == 0 && len(a.Ignore) > 0 {
 		i := ignore.CompileIgnoreLines(strings.Split(a.Ignore, "\n")...)
-		callback = a.callback(func(_ int, _, relative string, _ ufs.DirEntry) error {
+		callback = a.callback(func(_ *winfs.Dir, _, relative string, _ winfs.DirEntry) error {
 			if i.MatchesPath(relative) {
 				return SkipThis
 			}
@@ -172,14 +172,14 @@ func (a *Archive) Stream(ctx context.Context, w io.Writer) error {
 	}
 
 	// Open the base directory we were provided.
-	dirfd, name, closeFd, err := fs.SafePath(a.BaseDirectory)
+	dir, name, closeFd, err := fs.SafeDir(a.BaseDirectory)
 	defer closeFd()
 	if err != nil {
 		return err
 	}
 
 	// Recursively walk the base directory.
-	return fs.WalkDirat(dirfd, name, func(dirfd int, name, relative string, d ufs.DirEntry, err error) error {
+	return dir.WalkFrom(name, func(dir *winfs.Dir, name, relative string, d winfs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -187,7 +187,7 @@ func (a *Archive) Stream(ctx context.Context, w io.Writer) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			return callback(dirfd, name, relative, d)
+			return callback(dir, name, relative, d)
 		}
 	})
 }
@@ -203,7 +203,7 @@ func (a *Archive) callback(opts ...walkFunc) walkFunc {
 	if a.BaseDirectory != "" {
 		base = filepath.Base(a.BaseDirectory) + "/"
 	}
-	return func(dirfd int, name, relative string, d ufs.DirEntry) error {
+	return func(dir *winfs.Dir, name, relative string, d winfs.DirEntry) error {
 		// Skip directories because we are walking them recursively.
 		if d.IsDir() {
 			return nil
@@ -220,7 +220,7 @@ func (a *Archive) callback(opts ...walkFunc) walkFunc {
 		// Call the additional options passed to this callback function. If any of them return
 		// a non-nil error we will exit immediately.
 		for _, opt := range opts {
-			if err := opt(dirfd, name, relative, d); err != nil {
+			if err := opt(dir, name, relative, d); err != nil {
 				if err == SkipThis {
 					return nil
 				}
@@ -230,7 +230,7 @@ func (a *Archive) callback(opts ...walkFunc) walkFunc {
 
 		// Add the file to the archive, if it is nested in a directory,
 		// the directory will be automatically "created" in the archive.
-		return a.addToArchive(dirfd, name, relative, d)
+		return a.addToArchive(dir, name, relative, d)
 	}
 }
 
@@ -238,7 +238,7 @@ var SkipThis = errors.New("skip this")
 
 // Pushes only files defined in the Files key to the final archive.
 func (a *Archive) withFilesCallback() walkFunc {
-	return a.callback(func(_ int, _, relative string, _ ufs.DirEntry) error {
+	return a.callback(func(_ *winfs.Dir, _, relative string, _ winfs.DirEntry) error {
 		for _, f := range a.Files {
 			// Allow exact file matches, otherwise check if file is within a parent directory.
 			//
@@ -251,7 +251,7 @@ func (a *Archive) withFilesCallback() walkFunc {
 			// Once we have a match return a nil value here so that the loop stops and the
 			// call to this function will correctly include the file in the archive. If there
 			// are no matches we'll never make it to this line, and the final error returned
-			// will be the ufs.SkipDir error.
+			// will be the winfs.SkipDir error.
 			return nil
 		}
 
@@ -260,10 +260,10 @@ func (a *Archive) withFilesCallback() walkFunc {
 }
 
 // Adds a given file path to the final archive being created.
-func (a *Archive) addToArchive(dirfd int, name, relative string, entry ufs.DirEntry) error {
+func (a *Archive) addToArchive(dir *winfs.Dir, name, relative string, entry winfs.DirEntry) error {
 	s, err := entry.Info()
 	if err != nil {
-		if errors.Is(err, ufs.ErrNotExist) {
+		if errors.Is(err, winfs.ErrNotExist) {
 			return nil
 		}
 		return errors.WrapIff(err, "failed executing os.Lstat on '%s'", name)
@@ -327,7 +327,7 @@ func (a *Archive) addToArchive(dirfd int, name, relative string, entry ufs.DirEn
 	}
 
 	// Open the file.
-	f, err := a.Filesystem.unixFS.OpenFileat(dirfd, name, ufs.O_RDONLY, 0)
+	f, err := dir.OpenFile(name, winfs.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

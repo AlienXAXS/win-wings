@@ -1,16 +1,24 @@
+//go:build windows
+
 package system
 
 import (
-	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
+	"unsafe"
 
-	"github.com/acobaugh/osrelease"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/system"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/parsers/kernel"
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
+// Information is what the Panel renders on a node's detail page.
+//
+// The Docker block is retained with its original JSON shape so an unmodified
+// Panel still renders the page. The values describe the Windows equivalents
+// rather than being blanked out, which would leave the UI looking broken.
 type Information struct {
 	Version string            `json:"version"`
 	Docker  DockerInformation `json:"docker"`
@@ -55,90 +63,131 @@ type System struct {
 	OSType        string `json:"os_type"`
 }
 
+// InstanceCounter reports how many servers exist and how many are running.
+//
+// Set by the daemon at startup. Without it the container counts read zero, which
+// is accurate rather than misleading.
+var InstanceCounter func() (total int, running int)
+
 func GetSystemInformation() (*Information, error) {
-	k, err := kernel.GetKernelVersion()
-	if err != nil {
-		return nil, err
-	}
+	product, build := windowsRelease()
 
-	version, info, err := GetDockerInfo(context.Background())
-	if err != nil {
-		return nil, err
-	}
-
-	release, err := osrelease.Read()
-	if err != nil {
-		return nil, err
-	}
-
-	var os string
-	if release["PRETTY_NAME"] != "" {
-		os = release["PRETTY_NAME"]
-	} else if release["NAME"] != "" {
-		os = release["NAME"]
-	} else {
-		os = info.OperatingSystem
-	}
-
-	var filesystem string
-	for _, v := range info.DriverStatus {
-		if v[0] != "Backing Filesystem" {
-			continue
-		}
-		filesystem = v[1]
-		break
+	total, running := 0, 0
+	if InstanceCounter != nil {
+		total, running = InstanceCounter()
 	}
 
 	return &Information{
 		Version: Version,
 		Docker: DockerInformation{
-			Version: version.Version,
+			// There is no container engine. Reporting the daemon's own identity
+			// here is more useful to an operator reading the node page than an
+			// empty field.
+			Version: "win-wings (no container engine)",
 			Cgroups: DockerCgroups{
-				Driver:  info.CgroupDriver,
-				Version: info.CgroupVersion,
+				// Job Objects are what provides the resource limits cgroups did.
+				Driver:  "job-object",
+				Version: "1",
 			},
 			Containers: DockerContainers{
-				Total:   info.Containers,
-				Running: info.ContainersRunning,
-				Paused:  info.ContainersPaused,
-				Stopped: info.ContainersStopped,
+				Total:   total,
+				Running: running,
+				Paused:  0,
+				Stopped: total - running,
 			},
 			Storage: DockerStorage{
-				Driver:     info.Driver,
-				Filesystem: filesystem,
+				Driver:     "ntfs",
+				Filesystem: volumeFilesystem(),
 			},
-			Runc: DockerRunc{
-				Version: info.RuncCommit.ID,
-			},
+			Runc: DockerRunc{Version: ""},
 		},
 		System: System{
 			Architecture:  runtime.GOARCH,
 			CPUThreads:    runtime.NumCPU(),
-			MemoryBytes:   info.MemTotal,
-			KernelVersion: k.String(),
-			OS:            os,
+			MemoryBytes:   physicalMemoryBytes(),
+			KernelVersion: build,
+			OS:            product,
 			OSType:        runtime.GOOS,
 		},
 	}, nil
 }
 
-func GetDockerInfo(ctx context.Context) (types.Version, system.Info, error) {
-	// TODO: find a way to re-use the client from the docker environment.
-	c, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return types.Version{}, system.Info{}, err
-	}
-	defer c.Close()
+// windowsRelease returns the product name and build string.
+func windowsRelease() (product string, build string) {
+	product, build = "Windows", ""
 
-	dockerVersion, err := c.ServerVersion(ctx)
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
 	if err != nil {
-		return types.Version{}, system.Info{}, err
+		return product, build
+	}
+	defer k.Close()
+
+	if v, _, err := k.GetStringValue("ProductName"); err == nil && v != "" {
+		product = v
+	}
+	if v, _, err := k.GetStringValue("CurrentBuildNumber"); err == nil && v != "" {
+		build = v
+		if ubr, _, err := k.GetIntegerValue("UBR"); err == nil {
+			build = fmt.Sprintf("%s.%d", v, ubr)
+		}
+	}
+	if v, _, err := k.GetStringValue("DisplayVersion"); err == nil && v != "" {
+		product = fmt.Sprintf("%s %s", product, v)
+	}
+	return product, build
+}
+
+// memoryStatusEx mirrors MEMORYSTATUSEX.
+type memoryStatusEx struct {
+	Length               uint32
+	MemoryLoad           uint32
+	TotalPhys            uint64
+	AvailPhys            uint64
+	TotalPageFile        uint64
+	AvailPageFile        uint64
+	TotalVirtual         uint64
+	AvailVirtual         uint64
+	AvailExtendedVirtual uint64
+}
+
+// physicalMemoryBytes reports installed physical memory.
+func physicalMemoryBytes() int64 {
+	var m memoryStatusEx
+	m.Length = uint32(unsafe.Sizeof(m))
+
+	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("GlobalMemoryStatusEx")
+	if r, _, _ := proc.Call(uintptr(unsafe.Pointer(&m))); r == 0 {
+		return 0
+	}
+	return int64(m.TotalPhys)
+}
+
+// volumeFilesystem reports the filesystem backing the daemon's data volume.
+func volumeFilesystem() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	vol := filepath.VolumeName(exe)
+	if vol == "" {
+		return ""
 	}
 
-	dockerInfo, err := c.Info(ctx)
+	root, err := windows.UTF16PtrFromString(vol + `\`)
 	if err != nil {
-		return types.Version{}, system.Info{}, err
+		return ""
 	}
 
-	return dockerVersion, dockerInfo, nil
+	nameBuf := make([]uint16, 261)
+	fsBuf := make([]uint16, 261)
+	if err := windows.GetVolumeInformation(
+		root,
+		&nameBuf[0], uint32(len(nameBuf)),
+		nil, nil, nil,
+		&fsBuf[0], uint32(len(fsBuf)),
+	); err != nil {
+		return ""
+	}
+	return strings.ToLower(windows.UTF16ToString(fsBuf))
 }

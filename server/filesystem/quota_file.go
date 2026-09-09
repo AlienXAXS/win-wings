@@ -5,18 +5,18 @@ import (
 	"math"
 	"sync"
 
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 type quotaFile struct {
-	ufs.File
+	winfs.File
 
 	fs   *Filesystem
 	mu   sync.Mutex
 	size int64
 }
 
-func newQuotaFile(fs *Filesystem, file ufs.File, size int64) ufs.File {
+func newQuotaFile(fs *Filesystem, file winfs.File, size int64) winfs.File {
 	return &quotaFile{File: file, fs: fs, size: size}
 }
 

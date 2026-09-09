@@ -24,6 +24,8 @@ import (
 type Client interface {
 	GetBackupRemoteUploadURLs(ctx context.Context, backup string, size int64) (BackupRemoteUploadResponse, error)
 	GetInstallationScript(ctx context.Context, uuid string) (InstallationScript, error)
+	GetWindowsProfile(ctx context.Context, uuid string) (WindowsProfile, error)
+	CheckWindowsProfileSupport(ctx context.Context) error
 	GetServerConfiguration(ctx context.Context, uuid string) (ServerConfigurationResponse, error)
 	GetServers(context context.Context, perPage int) ([]RawServerData, error)
 	ResetServersState(ctx context.Context) error

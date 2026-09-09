@@ -9,7 +9,7 @@ import (
 	"emperror.dev/errors"
 	. "github.com/franela/goblin"
 
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 func TestFilesystem_Path(t *testing.T) {
@@ -28,8 +28,17 @@ func TestFilesystem_Path(t *testing.T) {
 // order to truly confirm this, we'll try to pass in a symlinked malicious file to all of
 // the calls and ensure they all fail with the same reason.
 func TestFilesystem_Blocks_Symlinks(t *testing.T) {
+	// The whole fixture is built from symlinks, which Windows only permits with
+	// administrator rights or Developer Mode. The equivalent escape is covered
+	// without any privilege by the junction tests in
+	// internal/winfs/os_root_probe_test.go.
+	if !symlinksSupported {
+		t.Skip("this host does not permit creating symlinks; see canSymlink")
+	}
+
 	g := Goblin(t)
 	fs, rfs := NewFs()
+	t.Cleanup(func() { _ = fs.Close() })
 
 	if err := rfs.CreateServerFileFromString("/../malicious.txt", "external content"); err != nil {
 		panic(err)
@@ -61,7 +70,7 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 
 			err := fs.Writefile("symlinked.txt", r)
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("cannot write to a non-existent file symlinked outside the root", func() {
@@ -69,7 +78,7 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 
 			err := fs.Writefile("symlinked_does_not_exist.txt", r)
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("cannot write to chained symlinks with target that does not exist outside the root", func() {
@@ -77,7 +86,7 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 
 			err := fs.Writefile("symlinked_does_not_exist2.txt", r)
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("cannot write a file to a directory symlinked outside the root", func() {
@@ -85,7 +94,7 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 
 			err := fs.Writefile("external_dir/foo.txt", r)
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
+			g.Assert(errors.Is(err, winfs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
 		})
 	})
 
@@ -93,19 +102,19 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 		g.It("cannot create a directory outside the root", func() {
 			err := fs.CreateDirectory("my_dir", "external_dir")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
+			g.Assert(errors.Is(err, winfs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
 		})
 
 		g.It("cannot create a nested directory outside the root", func() {
 			err := fs.CreateDirectory("my/nested/dir", "external_dir/foo/bar")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
+			g.Assert(errors.Is(err, winfs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
 		})
 
 		g.It("cannot create a nested directory outside the root", func() {
 			err := fs.CreateDirectory("my/nested/dir", "external_dir/server")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
+			g.Assert(errors.Is(err, winfs.ErrNotDirectory)).IsTrue("err is not ErrNotDirectory")
 		})
 	})
 
@@ -134,13 +143,13 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 
 			st, err := os.Lstat(filepath.Join(rfs.root, "server", "foo"))
 			g.Assert(err).IsNil()
-			g.Assert(st.Mode()&ufs.ModeSymlink != 0).IsTrue()
+			g.Assert(st.Mode()&winfs.ModeSymlink != 0).IsTrue()
 
 			err = fs.Rename("my_file.txt", "foo/my_file.txt")
-			g.Assert(errors.Is(err, ufs.ErrNotDirectory)).IsTrue()
+			g.Assert(errors.Is(err, winfs.ErrNotDirectory)).IsTrue()
 
 			st, err = os.Lstat(filepath.Join(rfs.root, "malicious_dir", "my_file.txt"))
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue()
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue()
 		})
 	})
 
@@ -148,7 +157,7 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 		g.It("cannot copy a file symlinked outside the directory root", func() {
 			err := fs.Copy("symlinked.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 		})
 	})
 
@@ -162,7 +171,7 @@ func TestFilesystem_Blocks_Symlinks(t *testing.T) {
 
 			_, err = rfs.StatServerFile("symlinked.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 		})
 	})
 

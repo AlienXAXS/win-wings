@@ -3,13 +3,14 @@ package environment
 import (
 	"fmt"
 	"math"
-	"os"
+	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/apex/log"
-	"github.com/docker/docker/api/types/container"
 
 	"github.com/pterodactyl/wings/config"
+	"github.com/pterodactyl/wings/internal/wire"
 )
 
 type Mount struct {
@@ -39,11 +40,12 @@ type Limits struct {
 	// use on the host system.
 	MemoryLimit int64 `json:"memory_limit"`
 
-	// The amount of additional swap space to be provided to a container instance.
+	// Swap is accepted from the Panel and ignored. Windows manages its page file
+	// globally and offers no per-process swap allocation.
 	Swap int64 `json:"swap"`
 
-	// The relative weight for IO operations in a container. This is relative to other
-	// containers on the system and should be a value between 10 and 1000.
+	// IoWeight is accepted from the Panel and ignored. Job Objects have no
+	// equivalent of Docker's block IO weight.
 	IoWeight uint16 `json:"io_weight"`
 
 	// The percentage of CPU that this instance is allowed to consume relative to
@@ -54,108 +56,107 @@ type Limits struct {
 	// The amount of disk space in megabytes that a server is allowed to use.
 	DiskSpace int64 `json:"disk_space"`
 
-	// Sets which CPU threads can be used by the docker instance.
+	// Threads selects which processors the server may run on, in cpuset syntax.
 	Threads string `json:"threads"`
 
+	// OOMDisabled is accepted from the Panel and ignored. A Job Object memory cap
+	// causes allocation failures rather than an OOM kill, so there is nothing to
+	// disable.
 	OOMDisabled bool `json:"oom_disabled"`
 }
 
-// ConvertedCpuLimit converts the CPU limit for a server build into a number
-// that can be better understood by the Docker environment. If there is no limit
-// set, return -1 which will indicate to Docker that it has unlimited CPU quota.
-func (l Limits) ConvertedCpuLimit() int64 {
-	if l.CpuLimit == 0 {
-		return -1
-	}
-
-	return l.CpuLimit * 1000
-}
-
-// MemoryOverheadMultiplier sets the hard limit for memory usage to be 5% more
-// than the amount of memory assigned to the server. If the memory limit for the
-// server is < 4G, use 10%, if less than 2G use 15%. This avoids unexpected
-// crashes from processes like Java which run over the limit.
+// MemoryOverheadMultiplier sets the hard limit for memory usage above the
+// amount assigned to the server. This matters more under a Job Object than it
+// did under Docker: JOB_OBJECT_LIMIT_JOB_MEMORY makes allocations fail rather
+// than invoking an OOM killer, so a runtime sitting fractionally over its limit
+// dies with an allocation error instead of being reaped.
 func (l Limits) MemoryOverheadMultiplier() float64 {
-	return config.Get().Docker.Overhead.GetMultiplier(l.MemoryLimit)
+	return config.Get().Runtime.Overhead.GetMultiplier(l.MemoryLimit)
 }
 
+// BoundedMemoryLimit returns the memory limit in bytes, including overhead.
 func (l Limits) BoundedMemoryLimit() int64 {
 	return int64(math.Round(float64(l.MemoryLimit) * l.MemoryOverheadMultiplier() * 1024 * 1024))
 }
 
-// ConvertedSwap returns the amount of swap available as a total in bytes. This
-// is returned as the amount of memory available to the server initially, PLUS
-// the amount of additional swap to include which is the format used by Docker.
-func (l Limits) ConvertedSwap() int64 {
-	if l.Swap < 0 {
-		return -1
-	}
-
-	return (l.Swap * 1024 * 1024) + l.BoundedMemoryLimit()
+// ProcessLimit returns the maximum number of concurrently active processes.
+func (l Limits) ProcessLimit() uint32 {
+	return config.Get().Runtime.ProcessLimit
 }
 
-// ProcessLimit returns the process limit for a container. This is currently
-// defined at a system level and not on a per-server basis.
-func (l Limits) ProcessLimit() int64 {
-	return config.Get().Docker.ContainerPidLimit
+// AsJobLimits converts the server's build settings into Job Object limits.
+func (l Limits) AsJobLimits() wire.Limits {
+	return wire.Limits{
+		MemoryBytes:  l.BoundedMemoryLimit(),
+		CpuRate:      l.JobCpuRate(),
+		CpuHardCap:   config.Get().Runtime.CpuHardCap,
+		AffinityMask: l.AffinityMask(),
+		ProcessLimit: l.ProcessLimit(),
+	}
 }
 
-// AsContainerResources returns the available resources for a container in a format
-// that Docker understands.
-func (l Limits) AsContainerResources() container.Resources {
-	pids := l.ProcessLimit()
-	resources := container.Resources{
-		Memory:            l.BoundedMemoryLimit(),
-		MemoryReservation: l.MemoryLimit * 1024 * 1024,
-		MemorySwap:        l.ConvertedSwap(),
-		OomKillDisable:    &l.OOMDisabled,
-		PidsLimit:         &pids,
+// JobCpuRate converts the Panel's CPU limit into the units a Job Object uses.
+//
+// The two express different things. The Panel's CpuLimit is a percentage of one
+// processor, so 200 means two cores fully used. A Job Object's CpuRate is a
+// share of *all* processors expressed in 1/100ths of a percent, where 10000 is
+// the whole machine. On an 8-core host, the Panel's 200 is therefore 2500.
+//
+// Returns 0 when no limit is set, which disables CPU rate control entirely.
+func (l Limits) JobCpuRate() uint32 {
+	if l.CpuLimit <= 0 {
+		return 0
 	}
 
-	// Only set the block IO weight when the host's cgroup hierarchy can honor it.
-	if blkioWeightSupported() {
-		resources.BlkioWeight = l.IoWeight
+	cpus := int64(runtime.NumCPU())
+	if cpus < 1 {
+		cpus = 1
 	}
 
-	// If the CPU Limit is not set, don't send any of these fields through. Providing
-	// them seems to break some Java services that try to read the available processors.
-	//
-	// @see https://github.com/pterodactyl/panel/issues/3988
-	if l.CpuLimit > 0 {
-		cfg := config.Get().Docker
-		period := cfg.CpuPeriodMicroseconds()
-		resources.CPUQuota = l.CpuLimit * period / 100
-		resources.CPUPeriod = period
-		resources.CPUShares = cfg.CpuShares
+	rate := l.CpuLimit * 100 / cpus
+	if rate < 1 {
+		// Never round a real limit down to "unlimited".
+		rate = 1
 	}
-
-	// Similar to above, don't set the specific assigned CPUs if we didn't actually limit
-	// the server to any of them.
-	if l.Threads != "" {
-		resources.CpusetCpus = l.Threads
+	if rate > 10000 {
+		rate = 10000
 	}
-
-	return resources
+	return uint32(rate)
 }
 
-// blkioWeightSupported reports whether the host's cgroup hierarchy can honor a
-// container block IO weight. On cgroup v2 the io.weight knob must be present or
-// runc fails container creation; cgroup v1/hybrid always supports it.
-func blkioWeightSupported() bool {
-	// cgroup v1/hybrid honors the weight via blkio.weight; only v2 needs probing.
-	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
-		return true
+// AffinityMask converts the Panel's thread pinning string into a processor mask.
+//
+// The Panel sends a cpuset-style list such as "0-2,4". Anything unparseable
+// yields 0, which leaves the server free to use every processor rather than
+// pinning it somewhere arbitrary.
+func (l Limits) AffinityMask() uint64 {
+	if l.Threads == "" {
+		return 0
 	}
-	// On v2 the knob lives on the delegated child cgroups, not the root.
-	for _, p := range []string{
-		"/sys/fs/cgroup/system.slice/io.weight",
-		"/sys/fs/cgroup/io.weight",
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return true
+
+	var mask uint64
+	for _, part := range strings.Split(l.Threads, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		lo, hi, found := strings.Cut(part, "-")
+		start, err := strconv.Atoi(strings.TrimSpace(lo))
+		if err != nil || start < 0 || start > 63 {
+			continue
+		}
+		end := start
+		if found {
+			end, err = strconv.Atoi(strings.TrimSpace(hi))
+			if err != nil || end < start || end > 63 {
+				continue
+			}
+		}
+		for i := start; i <= end; i++ {
+			mask |= 1 << uint(i)
 		}
 	}
-	return false
+	return mask
 }
 
 type Variables map[string]interface{}

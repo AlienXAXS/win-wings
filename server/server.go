@@ -1,13 +1,11 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -261,17 +259,10 @@ func (s *Server) CreateEnvironment() error {
 		return err
 	}
 
-	cfg := config.Get()
-	if cfg.System.MachineID.Enable {
-		// Hytale wants a machine-id in order to encrypt tokens for the server. So
-		// write a machine-id file for the server that contains the server's UUID
-		// without any dashes.
-		p := filepath.Join(cfg.System.MachineID.Directory, s.ID())
-		machineID := append(bytes.ReplaceAll([]byte(s.ID()), []byte{'-'}, []byte{}), '\n')
-		if err := os.WriteFile(p, machineID, 0o644); err != nil {
-			return fmt.Errorf("failed to write machine-id (at '%s') for server '%s': %w", p, s.ID(), err)
-		}
-	}
+	// Upstream wrote a generated /etc/machine-id here to bind-mount into the
+	// container, because some servers derive an identity from it. There are no
+	// mounts here and Windows exposes its own machine GUID, so an egg needing a
+	// stable identifier should read that or use the server UUID directly.
 
 	return s.Environment.Create()
 }

@@ -3,7 +3,7 @@ package server
 import (
 	"time"
 
-	"github.com/pterodactyl/wings/environment/docker"
+	winenv "github.com/pterodactyl/wings/environment/windows"
 
 	"github.com/pterodactyl/wings/environment"
 )
@@ -31,11 +31,10 @@ func (s *Server) SyncWithEnvironment() {
 		Labels:      cfg.Labels,
 	})
 
-	// For Docker specific environments we also want to update the configured image
-	// and stop configuration.
-	if e, ok := s.Environment.(*docker.Environment); ok {
-		s.Log().Debug("syncing stop configuration with configured docker environment")
-		e.SetImage(cfg.Container.Image)
+	// Keep the runtime selector and stop configuration in sync with the Panel.
+	if e, ok := s.Environment.(*winenv.Environment); ok {
+		s.Log().Debug("syncing runtime and stop configuration with the environment")
+		e.SetRuntime(cfg.Container.Image)
 		e.SetStopConfiguration(s.ProcessConfiguration().Stop)
 	}
 

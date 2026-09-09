@@ -8,11 +8,11 @@ import (
 
 	"github.com/gabriel-vasile/mimetype"
 
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 type Stat struct {
-	ufs.FileInfo
+	winfs.FileInfo
 	Mimetype string
 }
 
@@ -34,16 +34,16 @@ func (s *Stat) MarshalJSON() ([]byte, error) {
 		Modified: s.ModTime().Format(time.RFC3339),
 		Mode:     s.Mode().String(),
 		// Using `&ModePerm` on the file's mode will cause the mode to only have the permission values, and nothing else.
-		ModeBits:  strconv.FormatUint(uint64(s.Mode()&ufs.ModePerm), 8),
+		ModeBits:  strconv.FormatUint(uint64(s.Mode()&winfs.ModePerm), 8),
 		Size:      s.Size(),
 		Directory: s.IsDir(),
 		File:      !s.IsDir(),
-		Symlink:   s.Mode().Type()&ufs.ModeSymlink != 0,
+		Symlink:   s.Mode().Type()&winfs.ModeSymlink != 0,
 		Mime:      s.Mimetype,
 	})
 }
 
-func statFromFile(f ufs.File) (Stat, error) {
+func statFromFile(f winfs.File) (Stat, error) {
 	s, err := f.Stat()
 	if err != nil {
 		return Stat{}, err
@@ -71,7 +71,7 @@ func statFromFile(f ufs.File) (Stat, error) {
 // Stat stats a file or folder and returns the base stat object from go along
 // with the MIME data that can be used for editing files.
 func (fs *Filesystem) Stat(p string) (Stat, error) {
-	f, err := fs.unixFS.Open(p)
+	f, err := fs.winFS.Open(p)
 	if err != nil {
 		return Stat{}, err
 	}

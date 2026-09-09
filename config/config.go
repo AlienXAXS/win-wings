@@ -2,33 +2,25 @@ package config
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"text/template"
 	"time"
 
 	"emperror.dev/errors"
-	"github.com/acobaugh/osrelease"
 	"github.com/apex/log"
 	"github.com/creasty/defaults"
 	"github.com/gbrlsnchs/jwt/v3"
-	"golang.org/x/sys/unix"
+	"golang.org/x/sys/windows/registry"
 	"gopkg.in/yaml.v2"
-
-	"github.com/pterodactyl/wings/system"
 )
 
-const DefaultLocation = "/etc/pterodactyl/config.yml"
+const DefaultLocation = `C:\ProgramData\WinWings\config.yml`
 
 // DefaultTLSConfig sets sane defaults to use when configuring the internal
 // webserver to listen for public connections.
@@ -123,27 +115,37 @@ type RemoteQueryConfiguration struct {
 
 // SystemConfiguration defines basic system configuration settings.
 type SystemConfiguration struct {
-	// The root directory where all of the pterodactyl data is stored at.
-	RootDirectory string `default:"/var/lib/pterodactyl" json:"-" yaml:"root_directory"`
+	// The root directory where all of the win-wings data is stored at.
+	RootDirectory string `default:"C:\\ProgramData\\WinWings" json:"-" yaml:"root_directory"`
 
 	// Directory where logs for server installations and other wings events are logged.
-	LogDirectory string `default:"/var/log/pterodactyl" json:"-" yaml:"log_directory"`
+	LogDirectory string `default:"C:\\ProgramData\\WinWings\\logs" json:"-" yaml:"log_directory"`
 
-	// Directory where the server data is stored at.
-	Data string `default:"/var/lib/pterodactyl/volumes" json:"-" yaml:"data"`
+	// Directory where the server data is stored at. This tree is writable by the
+	// account server processes run under, and is the root exposed over SFTP.
+	//
+	// Nothing the daemon relies on may live here — see InstanceDirectory.
+	Data string `default:"C:\\ProgramData\\WinWings\\volumes" json:"-" yaml:"data"`
+
+	// InstanceDirectory holds per-server worker state: the worker's configuration,
+	// the resolved startup command, and its console log.
+	//
+	// This is deliberately a sibling of Data rather than a subdirectory of each
+	// server's files. The contents authorise what the worker executes, so a
+	// server able to write its own instance directory could rewrite its startup
+	// command and achieve arbitrary code execution as the account it runs under.
+	// The account running server processes must be denied write access here.
+	InstanceDirectory string `default:"C:\\ProgramData\\WinWings\\instances" json:"-" yaml:"instance_directory"`
 
 	// Directory where server archives for transferring will be stored.
-	ArchiveDirectory string `default:"/var/lib/pterodactyl/archives" json:"-" yaml:"archive_directory"`
+	ArchiveDirectory string `default:"C:\\ProgramData\\WinWings\\archives" json:"-" yaml:"archive_directory"`
 
 	// Directory where local backups will be stored on the machine.
-	BackupDirectory string `default:"/var/lib/pterodactyl/backups" json:"-" yaml:"backup_directory"`
+	BackupDirectory string `default:"C:\\ProgramData\\WinWings\\backups" json:"-" yaml:"backup_directory"`
 
-	// TmpDirectory specifies where temporary files for Pterodactyl installation processes
-	// should be created. This supports environments running docker-in-docker.
-	TmpDirectory string `default:"/tmp/pterodactyl" json:"-" yaml:"tmp_directory"`
-
-	// The user that should own all of the server files, and be used for containers.
-	Username string `default:"pterodactyl" yaml:"username"`
+	// TmpDirectory specifies where temporary files for installation processes
+	// should be created.
+	TmpDirectory string `default:"C:\\ProgramData\\WinWings\\tmp" json:"-" yaml:"tmp_directory"`
 
 	// The timezone for this Wings instance. This is detected by Wings automatically if possible,
 	// and falls back to UTC if not able to be detected. If you need to set this manually, that
@@ -152,65 +154,8 @@ type SystemConfiguration struct {
 	// This timezone value is passed into all containers created by Wings.
 	Timezone string `yaml:"timezone"`
 
-	// Definitions for the user that gets created to ensure that we can quickly access
-	// this information without constantly having to do a system lookup.
-	User struct {
-		// Rootless controls settings related to rootless container daemons.
-		Rootless struct {
-			// Enabled controls whether rootless containers are enabled.
-			Enabled bool `yaml:"enabled" default:"false"`
-			// ContainerUID controls the UID of the user inside the container.
-			// This should likely be set to 0 so the container runs as the user
-			// running Wings.
-			ContainerUID int `yaml:"container_uid" default:"0"`
-			// ContainerGID controls the GID of the user inside the container.
-			// This should likely be set to 0 so the container runs as the user
-			// running Wings.
-			ContainerGID int `yaml:"container_gid" default:"0"`
-		} `yaml:"rootless"`
-
-		Uid int `yaml:"uid"`
-		Gid int `yaml:"gid"`
-	} `yaml:"user"`
-
-	// Passwd controls the mounting of a generated passwd files into containers started by Wings.
-	Passwd struct {
-		// Enable controls whether generated passwd files should be mounted into containers.
-		//
-		// By default this option is disabled and Wings will not mount any
-		// additional passwd files into containers.
-		Enable bool `yaml:"enabled" default:"false"`
-
-		// Directory is the directory on disk where the generated passwd files will be stored.
-		// This directory may be temporary as it will be re-created whenever Wings is started.
-		//
-		// This path **WILL** be both written to by Wings and mounted into containers created by
-		// Wings. If you are running Wings itself in a container, this path will need to be mounted
-		// into the Wings container as the exact path on the host, which should match the value
-		// specified here. If you are using SELinux, you will need to make sure this file has the
-		// correct SELinux context in order for containers to use it.
-		Directory string `yaml:"directory" default:"/run/wings/etc"`
-	} `yaml:"passwd"`
-
-	// MachineID controls the mounting of a generated `/etc/machine-id` file into containers started by Wings.
-	MachineID struct {
-		// Enable controls whether a generated machine-id file should be mounted
-		// into containers.
-		//
-		// By default this option is enabled and Wings will mount an additional
-		// machine-id file into containers.
-		Enable bool `yaml:"enabled" default:"true"`
-
-		// Directory is the directory on disk where the generated machine-id files will be stored.
-		// This directory may be temporary as it will be re-created whenever Wings is started.
-		//
-		// This path **WILL** be both written to by Wings and mounted into containers created by
-		// Wings. If you are running Wings itself in a container, this path will need to be mounted
-		// into the Wings container as the exact path on the host, which should match the value
-		// specified here. If you are using SELinux, you will need to make sure this file has the
-		// correct SELinux context in order for containers to use it.
-		Directory string `yaml:"directory" default:"/run/wings/machine-id"`
-	} `yaml:"machine_id"`
+	// Account configures the Windows account(s) that server processes run under.
+	Account AccountConfiguration `yaml:"account"`
 
 	// The amount of time in seconds that can elapse before a server's disk space calculation is
 	// considered stale and a re-check should occur. DANGER: setting this value too low can seriously
@@ -237,10 +182,6 @@ type SystemConfiguration struct {
 	// frequently modifying a servers' files.
 	CheckPermissionsOnBoot bool `default:"true" yaml:"check_permissions_on_boot"`
 
-	// If set to false Wings will not attempt to write a log rotate configuration to the disk
-	// when it boots and one is not detected.
-	EnableLogRotate bool `default:"true" yaml:"enable_log_rotate"`
-
 	// The number of lines to send when a server connects to the websocket.
 	WebsocketLogCount int `default:"150" yaml:"websocket_log_count"`
 
@@ -251,8 +192,6 @@ type SystemConfiguration struct {
 	Backups Backups `yaml:"backups"`
 
 	Transfers Transfers `yaml:"transfers"`
-
-	OpenatMode string `default:"auto" yaml:"openat_mode"`
 }
 
 type CrashDetection struct {
@@ -349,7 +288,7 @@ type Configuration struct {
 
 	Api    ApiConfiguration    `json:"api" yaml:"api"`
 	System SystemConfiguration `json:"system" yaml:"system"`
-	Docker DockerConfiguration `json:"docker" yaml:"docker"`
+	Runtime RuntimeConfiguration `json:"runtime" yaml:"runtime"`
 
 	// Defines internal throttling configurations for server processes to prevent
 	// someone from running an endless loop that spams data to logs.
@@ -520,108 +459,7 @@ func WriteToDisk(c *Configuration) error {
 	return nil
 }
 
-// EnsurePterodactylUser ensures that the Pterodactyl core user exists on the
-// system. This user will be the owner of all data in the root data directory
-// and is used as the user within containers. If files are not owned by this
-// user there will be issues with permissions on Docker mount points.
-//
-// This function IS NOT thread safe and should only be called in the main thread
-// when the application is booting.
-func EnsurePterodactylUser() error {
-	sysName, err := getSystemName()
-	if err != nil {
-		return err
-	}
 
-	// Our way of detecting if wings is running inside of Docker.
-	if sysName == "distroless" {
-		_config.System.Username = system.FirstNotEmpty(os.Getenv("WINGS_USERNAME"), "pterodactyl")
-		_config.System.User.Uid = system.MustInt(system.FirstNotEmpty(os.Getenv("WINGS_UID"), "988"))
-		_config.System.User.Gid = system.MustInt(system.FirstNotEmpty(os.Getenv("WINGS_GID"), "988"))
-		return nil
-	}
-
-	if _config.System.User.Rootless.Enabled {
-		log.Info("rootless mode is enabled, skipping user creation...")
-		u, err := user.Current()
-		if err != nil {
-			return err
-		}
-		_config.System.Username = u.Username
-		_config.System.User.Uid = system.MustInt(u.Uid)
-		_config.System.User.Gid = system.MustInt(u.Gid)
-		return nil
-	}
-
-	log.WithField("username", _config.System.Username).Info("checking for pterodactyl system user")
-	u, err := user.Lookup(_config.System.Username)
-	// If an error is returned but it isn't the unknown user error just abort
-	// the process entirely. If we did find a user, return it immediately.
-	if err != nil {
-		if _, ok := err.(user.UnknownUserError); !ok {
-			return err
-		}
-	} else {
-		_config.System.User.Uid = system.MustInt(u.Uid)
-		_config.System.User.Gid = system.MustInt(u.Gid)
-		return nil
-	}
-
-	command := fmt.Sprintf("useradd --system --no-create-home --shell /usr/sbin/nologin %s", _config.System.Username)
-	// Alpine Linux is the only OS we currently support that doesn't work with the useradd
-	// command, so in those cases we just modify the command a bit to work as expected.
-	if strings.HasPrefix(sysName, "alpine") {
-		command = fmt.Sprintf("adduser -S -D -H -G %[1]s -s /sbin/nologin %[1]s", _config.System.Username)
-		// We have to create the group first on Alpine, so do that here before continuing on
-		// to the user creation process.
-		if _, err := exec.Command("addgroup", "-S", _config.System.Username).Output(); err != nil {
-			return err
-		}
-	}
-
-	split := strings.Split(command, " ")
-	if _, err := exec.Command(split[0], split[1:]...).Output(); err != nil {
-		return err
-	}
-	u, err = user.Lookup(_config.System.Username)
-	if err != nil {
-		return err
-	}
-	_config.System.User.Uid = system.MustInt(u.Uid)
-	_config.System.User.Gid = system.MustInt(u.Gid)
-	return nil
-}
-
-// ConfigurePasswd generates required passwd files for use with containers started by Wings.
-func ConfigurePasswd() error {
-	passwd := _config.System.Passwd
-	if !passwd.Enable {
-		return nil
-	}
-
-	v := []byte(fmt.Sprintf(
-		`root:x:0:
-container:x:%d:
-nogroup:x:65534:`,
-		_config.System.User.Gid,
-	))
-	if err := os.WriteFile(filepath.Join(passwd.Directory, "group"), v, 0o644); err != nil {
-		return fmt.Errorf("failed to write file to %s/group: %v", passwd.Directory, err)
-	}
-
-	v = []byte(fmt.Sprintf(
-		`root:x:0:0::/root:/bin/sh
-container:x:%d:%d::/home/container:/bin/sh
-nobody:x:65534:65534::/var/empty:/bin/sh
-`,
-		_config.System.User.Uid,
-		_config.System.User.Gid,
-	))
-	if err := os.WriteFile(filepath.Join(passwd.Directory, "passwd"), v, 0o644); err != nil {
-		return fmt.Errorf("failed to write file to %s/passwd: %v", passwd.Directory, err)
-	}
-	return nil
-}
 
 // FromFile reads the configuration from the provided file and stores it in the
 // global singleton for this instance.
@@ -696,72 +534,14 @@ func ConfigureDirectories() error {
 		return err
 	}
 
-	if _config.System.Passwd.Enable {
-		log.WithField("path", _config.System.Passwd.Directory).Debug("ensuring passwd directory exists")
-		if err := os.MkdirAll(_config.System.Passwd.Directory, 0o755); err != nil {
-			return err
-		}
-	}
-
-	if _config.System.MachineID.Enable {
-		log.WithField("path", _config.System.MachineID.Directory).Debug("ensuring machine-id directory exists")
-		if err := os.MkdirAll(_config.System.MachineID.Directory, 0o755); err != nil {
-			return err
-		}
+	log.WithField("path", _config.System.InstanceDirectory).Debug("ensuring instance directory exists")
+	if err := os.MkdirAll(_config.System.InstanceDirectory, 0o700); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// EnableLogRotation writes a logrotate file for wings to the system logrotate
-// configuration directory if one exists and a logrotate file is not found. This
-// allows us to basically automate away the log rotation for most installs, but
-// also enable users to make modifications on their own.
-//
-// This function IS NOT thread-safe.
-func EnableLogRotation() error {
-	if !_config.System.EnableLogRotate {
-		log.Info("skipping log rotate configuration, disabled in wings config file")
-		return nil
-	}
-
-	if st, err := os.Stat("/etc/logrotate.d"); err != nil && !os.IsNotExist(err) {
-		return err
-	} else if (err != nil && os.IsNotExist(err)) || !st.IsDir() {
-		return nil
-	}
-	if _, err := os.Stat("/etc/logrotate.d/wings"); err == nil || !os.IsNotExist(err) {
-		return err
-	}
-
-	log.Info("no log rotation configuration found: adding file now")
-	// If we've gotten to this point it means the logrotate directory exists on the system
-	// but there is not a file for wings already. In that case, let us write a new file to
-	// it so files can be rotated easily.
-	f, err := os.Create("/etc/logrotate.d/wings")
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	t, err := template.New("logrotate").Parse(`{{.LogDirectory}}/wings.log {
-    size 10M
-    compress
-    delaycompress
-    dateext
-    maxage 7
-    missingok
-    notifempty
-    postrotate
-        /usr/bin/systemctl kill -s HUP wings.service >/dev/null 2>&1 || true
-    endscript
-}`)
-	if err != nil {
-		return err
-	}
-
-	return errors.Wrap(t.Execute(f, _config.System), "config: failed to write logrotate to disk")
-}
 
 // GetStatesPath returns the location of the JSON file that tracks server states.
 func (sc *SystemConfiguration) GetStatesPath() string {
@@ -774,89 +554,59 @@ func (sc *SystemConfiguration) GetStatesPath() string {
 //
 // This function IS NOT thread-safe.
 func ConfigureTimezone() error {
-	tz := os.Getenv("TZ")
-	if _config.System.Timezone == "" && tz != "" {
-		_config.System.Timezone = tz
-	}
 	if _config.System.Timezone == "" {
-		b, err := os.ReadFile("/etc/timezone")
-		if err != nil {
-			if !os.IsNotExist(err) {
-				return errors.WithMessage(err, "config: failed to open timezone file")
-			}
-
-			_config.System.Timezone = "UTC"
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-			defer cancel()
-			// Okay, file isn't found on this OS, we will try using timedatectl to handle this. If this
-			// command fails, exit, but if it returns a value use that. If no value is returned we will
-			// fall through to UTC to get Wings booted at least.
-			out, err := exec.CommandContext(ctx, "timedatectl").Output()
-			if err != nil {
-				log.WithField("error", err).Warn("failed to execute \"timedatectl\" to determine system timezone, falling back to UTC")
-				return nil
-			}
-
-			r := regexp.MustCompile(`Time zone: ([\w/]+)`)
-			matches := r.FindSubmatch(out)
-			if len(matches) != 2 || string(matches[1]) == "" {
-				log.Warn("failed to parse timezone from \"timedatectl\" output, falling back to UTC")
-				return nil
-			}
-			_config.System.Timezone = string(matches[1])
-		} else {
-			_config.System.Timezone = string(b)
+		if tz := os.Getenv("TZ"); tz != "" {
+			_config.System.Timezone = tz
 		}
 	}
 
-	_config.System.Timezone = regexp.MustCompile(`(?i)[^a-z_/]+`).ReplaceAllString(_config.System.Timezone, "")
-	_, err := time.LoadLocation(_config.System.Timezone)
+	// Windows identifies time zones by its own key names ("GMT Standard Time")
+	// rather than IANA names ("Europe/London"), and Go ships no mapping between
+	// the two. Rather than guess, read the system zone only to report it, and
+	// require the operator to set system.timezone explicitly.
+	//
+	// This value is handed to server processes as TZ, where runtimes such as the
+	// JVM and Node expect an IANA name. Defaulting to a silently wrong zone would
+	// skew every timestamp a server writes, so prefer a loud fallback to UTC.
+	//
+	// TODO: embed the CLDR windowsZones mapping and resolve this automatically.
+	if _config.System.Timezone == "" {
+		_config.System.Timezone = "UTC"
+		if name, err := systemTimezoneKeyName(); err != nil {
+			log.WithField("error", err).Warn("failed to determine the system time zone, falling back to UTC")
+		} else {
+			log.WithField("windows_timezone", name).
+				Warn("no system.timezone configured and Windows zone names cannot be mapped to IANA automatically; " +
+					"falling back to UTC — set system.timezone in the config to the correct IANA name")
+		}
+		return nil
+	}
 
-	return errors.WithMessage(err, fmt.Sprintf("the supplied timezone %s is invalid", _config.System.Timezone))
+	_config.System.Timezone = regexp.MustCompile(`(?i)[^a-z_/+\-0-9]+`).ReplaceAllString(_config.System.Timezone, "")
+	if _, err := time.LoadLocation(_config.System.Timezone); err != nil {
+		return errors.WithMessage(err, fmt.Sprintf("the supplied timezone %s is invalid", _config.System.Timezone))
+	}
+	return nil
 }
 
-// Gets the system release name.
-func getSystemName() (string, error) {
-	// use osrelease to get release version and ID
-	release, err := osrelease.Read()
+// systemTimezoneKeyName returns the Windows time zone key name configured on the
+// host, e.g. "GMT Standard Time". This is not an IANA identifier.
+func systemTimezoneKeyName() (string, error) {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SYSTEM\CurrentControlSet\Control\TimeZoneInformation`, registry.QUERY_VALUE)
 	if err != nil {
 		return "", err
 	}
-	return release["ID"], nil
+	defer k.Close()
+
+	name, _, err := k.GetStringValue("TimeZoneKeyName")
+	if err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
-var (
-	openat2    atomic.Bool
-	openat2Set atomic.Bool
-)
 
-func UseOpenat2() bool {
-	if openat2Set.Load() {
-		return openat2.Load()
-	}
-	defer openat2Set.Store(true)
-
-	c := Get()
-	openatMode := c.System.OpenatMode
-	switch openatMode {
-	case "openat2":
-		openat2.Store(true)
-		return true
-	case "openat":
-		openat2.Store(false)
-		return false
-	default:
-		fd, err := unix.Openat2(unix.AT_FDCWD, "/", &unix.OpenHow{})
-		if err != nil {
-			log.WithError(err).Warn("error occurred while checking for openat2 support, falling back to openat")
-			openat2.Store(false)
-			return false
-		}
-		_ = unix.Close(fd)
-		openat2.Store(true)
-		return true
-	}
-}
 
 // Expand expands an input string by calling [os.ExpandEnv] to expand all
 // environment variables, then checks if the value is prefixed with `file://`

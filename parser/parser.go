@@ -18,7 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 // The file parsing options that are available for a server configuration file.
@@ -205,14 +205,17 @@ type templatableConfig struct {
 
 func newTemplatableConfig(c *config.Configuration) templatableConfig {
 	var t templatableConfig
-	t.Docker.Interface = c.Docker.Network.Interface
-	t.Docker.Network.Interface = c.Docker.Network.Interface
+	// The `config.docker.interface` keys are retained because ported eggs may
+	// still reference them in their configuration templates. There is no bridge
+	// network here, so both resolve to the node's configured bind address.
+	t.Docker.Interface = c.Runtime.BindAddress
+	t.Docker.Network.Interface = c.Runtime.BindAddress
 	return t
 }
 
 // Parse parses a given configuration file and updates all the values within
 // as defined in the API response from the Panel.
-func (f *ConfigurationFile) Parse(file ufs.File) error {
+func (f *ConfigurationFile) Parse(file winfs.File) error {
 	// log.WithField("path", path).WithField("parser", f.Parser.String()).Debug("parsing server configuration file")
 
 	// Refuse to parse files larger than the cap. Every parser below buffers the
@@ -251,7 +254,7 @@ func (f *ConfigurationFile) Parse(file ufs.File) error {
 }
 
 // Parses an xml file.
-func (f *ConfigurationFile) parseXmlFile(file ufs.File) error {
+func (f *ConfigurationFile) parseXmlFile(file winfs.File) error {
 	doc := etree.NewDocument()
 	if _, err := doc.ReadFrom(io.LimitReader(file, maxConfigFileSize)); err != nil {
 		return err
@@ -330,7 +333,7 @@ func (f *ConfigurationFile) parseXmlFile(file ufs.File) error {
 }
 
 // Parses an ini file.
-func (f *ConfigurationFile) parseIniFile(file ufs.File) error {
+func (f *ConfigurationFile) parseIniFile(file winfs.File) error {
 	// Wrap the file in a NopCloser so the ini package doesn't close the file.
 	cfg, err := ini.Load(io.NopCloser(io.LimitReader(file, maxConfigFileSize)))
 	if err != nil {
@@ -411,7 +414,7 @@ func (f *ConfigurationFile) parseIniFile(file ufs.File) error {
 // Parses a json file updating any matching key/value pairs. If a match is not found, the
 // value is set regardless in the file. See the commentary in parseYamlFile for more details
 // about what is happening during this process.
-func (f *ConfigurationFile) parseJsonFile(file ufs.File) error {
+func (f *ConfigurationFile) parseJsonFile(file winfs.File) error {
 	b, err := io.ReadAll(io.LimitReader(file, maxConfigFileSize))
 	if err != nil {
 		return err
@@ -438,7 +441,7 @@ func (f *ConfigurationFile) parseJsonFile(file ufs.File) error {
 
 // Parses a yaml file and updates any matching key/value pairs before persisting
 // it back to the disk.
-func (f *ConfigurationFile) parseYamlFile(file ufs.File) error {
+func (f *ConfigurationFile) parseYamlFile(file winfs.File) error {
 	b, err := io.ReadAll(io.LimitReader(file, maxConfigFileSize))
 	if err != nil {
 		return err
@@ -487,7 +490,7 @@ func (f *ConfigurationFile) parseYamlFile(file ufs.File) error {
 // Parses a text file using basic find and replace. This is a highly inefficient method of
 // scanning a file and performing a replacement. You should attempt to use anything other
 // than this function where possible.
-func (f *ConfigurationFile) parseTextFile(file ufs.File) error {
+func (f *ConfigurationFile) parseTextFile(file winfs.File) error {
 	b := bytes.NewBuffer(nil)
 	s := bufio.NewScanner(io.LimitReader(file, maxConfigFileSize))
 	s.Buffer(make([]byte, 0, 64*1024), maxTextScanTokenSize)
@@ -553,7 +556,7 @@ func (f *ConfigurationFile) parseTextFile(file ufs.File) error {
 //
 // @see https://github.com/pterodactyl/panel/issues/2308 (original)
 // @see https://github.com/pterodactyl/panel/issues/3009 ("bug" introduced as result)
-func (f *ConfigurationFile) parsePropertiesFile(file ufs.File) error {
+func (f *ConfigurationFile) parsePropertiesFile(file winfs.File) error {
 	b, err := io.ReadAll(io.LimitReader(file, maxConfigFileSize))
 	if err != nil {
 		return err

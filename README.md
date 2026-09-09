@@ -1,42 +1,108 @@
-[![Logo Image](https://cdn.pterodactyl.io/logos/new/pterodactyl_logo.png)](https://pterodactyl.io)
+# win-wings
 
-![Discord](https://img.shields.io/discord/122900397965705216?label=Discord&logo=Discord&logoColor=white)
-![GitHub Releases](https://img.shields.io/github/downloads/pterodactyl/wings/latest/total)
-[![Go Report Card](https://goreportcard.com/badge/github.com/pterodactyl/wings)](https://goreportcard.com/report/github.com/pterodactyl/wings)
+A Windows-native fork of [Pterodactyl wings](https://github.com/pterodactyl/wings).
 
-# Pterodactyl Wings
+Servers run as ordinary Windows processes inside Job Objects. There is no Docker,
+no containers, and no WINE. Some game servers simply run badly under emulation;
+this exists so they can run natively.
 
-Wings is Pterodactyl's server control plane, built for the rapidly changing gaming industry and designed to be
-highly performant and secure. Wings provides an HTTP API allowing you to interface directly with running server
-instances, fetch server logs, generate backups, and control all aspects of the server lifecycle.
+> **Status: ready for first deployment and testing.** The full test suite passes
+> on Windows, including tests that drive the real kernel APIs. It has not yet run
+> a production workload. See [Known gaps](#known-gaps).
 
-In addition, Wings ships with a built-in SFTP server allowing your system to remain free of Pterodactyl specific
-dependencies, and allowing users to authenticate with the same credentials they would normally use to access the Panel.
+## What is different from upstream
 
-## Sponsors
+| Docker provided | Replaced by |
+|---|---|
+| cgroup resource limits | Windows Job Objects |
+| kill the container, kill the tree | `TerminateJobObject` |
+| filesystem isolation | separate local accounts + NTFS ACLs |
+| port publishing | **nothing** — servers are trusted to honour their allocation |
+| console surviving daemon restart | a per-server worker process |
+| `openat2` path sandbox | Go's `os.Root` |
+| bash install scripts | PowerShell |
 
-I would like to extend my sincere thanks to the following sponsors for helping fund Pterodactyl's development.
-[Interested in becoming a sponsor?](https://github.com/sponsors/pterodactyl)
+Two binaries are produced and must be deployed together:
 
-| Company                                                                           | About                                                                                                                                                                                                                                           |
-|-----------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [**Buildurly**](https://buildurly.com/)                                           | Buildurly is a hardware procurement company. They deliver tailored, enterprise-grade hardware solutions designed around your unique needs. From sourcing to delivery, Buildurly's white-glove service ensures a seamless, worry-free, professional experience.                                                                                                                                          |
-| [**Hosturly**](https://hosturly.com/)                                             | Hosturly is an enterprise hosting provider. They provide cost-effective, high-performance, and reliable services, including VPS, Web, Dedicated, and Colocation.                                                                                |
-| [**indifferent broccoli**](https://indifferentbroccoli.com/)                      | indifferent broccoli is a game server hosting and rental company. With them, you get top-notch computer power for your gaming sessions. They destroy lag, latency, and complexity--letting you focus on the fun stuff.                         |
-| [**Infraly, LLC**](https://infraly.co/)                                           | Infraly is an infrastructure company powering the next generation of online services. Through their brands, Infraly delivers cutting-edge solutions across multiple markets. Their vertically integrated approach provides unmatched performance, scalability, and reliability, giving our customers full control.                                                                                     |
-| [**MineStrator**](https://minestrator.com/)                                       | MineStrator is a game server hosting provider. Looking for the most high-end French hosting company for your Minecraft server? More than 24,000 members on our Discord trust us. Give us a try!                                                |
-| [**Physgun**](https://physgun.com/)                                               | Physgun is a game server hosting provider. Most providers rent rack space and rebrand a panel. At Physgun, they engineer the performance, write the features, and staff the support. Physgun truly is game hosting perfected!                   |
-| [**WISP**](https://wisp.gg/)                                                      | WISP is an industry-leading SaaS platform for game server management, designed for hosting companies, gaming organizations, and enthusiasts. WISP combines modern, intuitive interfaces with powerful tools, making server deployment and administration seamless, scalable, and efficient.     
+```
+wings.exe                 the daemon; runs as a Windows service
+winwings-worker.exe       one detached supervisor per running server
+```
 
-## Documentation
+The worker exists because Windows cannot reattach to another process's stdio.
+Without it, restarting the daemon would permanently lose the console for every
+running server. With it, the daemon restarts freely and reconnects — replaying
+the output it missed. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-* [Panel Documentation](https://pterodactyl.io/panel/1.0/getting_started.html)
-* [Wings Documentation](https://pterodactyl.io/wings/1.0/installing.html)
-* [Community Guides](https://pterodactyl.io/community/about.html)
-* Or, get additional help [via Discord](https://discord.gg/pterodactyl)
+## The Panel is not forked
 
-## Reporting Issues
+This runs against an unmodified Pterodactyl Panel plus a Blueprint plugin that
+serves per-egg Windows profiles: a PowerShell install script, a Windows startup
+command, a stop configuration, and a runtime selector.
 
-Please use the [pterodactyl/panel](https://github.com/pterodactyl/panel) repository to report any issues or make
-feature requests for Wings. In addition, the [security policy](https://github.com/pterodactyl/panel/security/policy) listed
-within that repository also applies to Wings.
+The contract that plugin must implement is in
+[docs/PANEL-API.md](docs/PANEL-API.md).
+
+For bring-up you can run without it — set `runtime.require_windows_profile: false`
+and the daemon falls back to each egg's standard fields. That is only useful for
+testing that a node comes up; most eggs will not actually install or start,
+because their scripts are bash.
+
+## Build
+
+```bash
+make release
+```
+
+Requires Go 1.25 or newer (the sandbox is built on `os.Root`).
+
+## Install
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). In short:
+
+```powershell
+# Elevated
+C:\ProgramData\WinWings\wings.exe service install --config C:\ProgramData\WinWings\config.yml
+sc start winwings
+
+# Unelevated
+C:\ProgramData\WinWings\wings.exe service status
+C:\ProgramData\WinWings\wings.exe diagnostics
+```
+
+Do not skip the account setup in step 2 of the deployment guide. Without it every
+server runs as the daemon's account and can read every other server's files, plus
+the config file holding your Panel token. The daemon warns about this at boot.
+
+## Testing
+
+```bash
+make test               # everything
+make test-integration   # the tests that drive real kernel APIs
+```
+
+The Job Object, process and worker tests are only meaningful on Windows. They
+verify that a job captures a process *and* its children, that terminating the job
+kills the whole tree, that console output and stdin work, and that a server keeps
+running across a daemon disconnect and reconnect.
+
+## Known gaps
+
+- **ConPTY is unverified.** Implemented and matching Microsoft's documented
+  sample, but it produced no output on the development machine. Plain pipes work
+  fully and are the default; only steamcmd-class processes need ConPTY. Run
+  `go test ./internal/winproc -run TestConPTY -v` on a real interactive Windows
+  host — the diagnostic records everything already ruled out.
+- **Port allocations are not enforced.** Nothing binds on a server's behalf.
+  Use per-account firewall rules.
+- **No per-server network statistics.** There is no network namespace.
+- **Cross-platform transfers are unsupported.** Backups carry POSIX modes and
+  symlinks; Linux ↔ Windows node migration will not work.
+- **Every egg needs porting.** No upstream egg works unchanged.
+
+## Licence
+
+MIT, as upstream. See [LICENSE](LICENSE).
+
+This is an unofficial fork and is not affiliated with or endorsed by the
+Pterodactyl project.

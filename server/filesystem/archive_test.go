@@ -4,6 +4,7 @@ import (
 	"context"
 	iofs "io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 func TestArchive_Stream(t *testing.T) {
 	g := Goblin(t)
 	fs, rfs := NewFs()
+	t.Cleanup(func() { _ = fs.Close() })
 
 	g.Describe("Archive", func() {
 		g.AfterEach(func() {
@@ -98,7 +100,10 @@ func getFiles(f iofs.ReadDirFS, name string) ([]string, error) {
 	for _, e := range entries {
 		entryName := e.Name()
 		if name != "." {
-			entryName = filepath.Join(name, entryName)
+			// io/fs paths are always slash-separated regardless of platform, so
+			// path.Join is correct here. filepath.Join yields backslashes on
+			// Windows and would not match the names stored in the archive.
+			entryName = path.Join(name, entryName)
 		}
 
 		if e.IsDir() {

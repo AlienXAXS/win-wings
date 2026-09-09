@@ -80,6 +80,9 @@ func testBackupGenerateRequiresUuidIdentifier(t *testing.T, createBackup func(st
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows will not remove a directory while a handle is open on it, so the
+	// sandbox must be released before t.TempDir cleanup runs.
+	t.Cleanup(func() { _ = fsys.Close() })
 
 	existingArchive := filepath.Join(targetDir, "archive.tar.gz")
 	existingArchiveContents := []byte("existing archive")

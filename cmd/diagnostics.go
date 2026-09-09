@@ -1,30 +1,25 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os/exec"
+	"os"
 	"path"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/apex/log"
-	"github.com/docker/docker/api/types"
-	dockersystem "github.com/docker/docker/api/types/system"
-	"github.com/docker/docker/pkg/parsers/kernel"
-	"github.com/docker/docker/pkg/parsers/operatingsystem"
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows/registry"
 
 	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/loggers/cli"
 	"github.com/pterodactyl/wings/system"
 )
@@ -92,20 +87,12 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 		panic(err)
 	}
 
-	dockerVersion, dockerInfo, dockerErr := getDockerInfo()
-
 	output := &strings.Builder{}
-	fmt.Fprintln(output, "Pterodactyl Wings - Diagnostics Report")
+	fmt.Fprintln(output, "win-wings - Diagnostics Report")
 	printHeader(output, "Versions")
 	fmt.Fprintln(output, "               Wings:", system.Version)
-	if dockerErr == nil {
-		fmt.Fprintln(output, "              Docker:", dockerVersion.Version)
-	}
-	if v, err := kernel.GetKernelVersion(); err == nil {
-		fmt.Fprintln(output, "              Kernel:", v)
-	}
-	if os, err := operatingsystem.GetOperatingSystem(); err == nil {
-		fmt.Fprintln(output, "                  OS:", os)
+	if v, err := windowsVersion(); err == nil {
+		fmt.Fprintln(output, "             Windows:", v)
 	}
 
 	printHeader(output, "Wings Configuration")
@@ -128,53 +115,51 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	fmt.Fprintln(output, "   Archive Directory:", cfg.System.ArchiveDirectory)
 	fmt.Fprintln(output, "    Backup Directory:", cfg.System.BackupDirectory)
 	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "            Username:", cfg.System.Username)
+	fmt.Fprintln(output, "  Instance Directory:", cfg.System.InstanceDirectory)
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "           Isolation:", cfg.System.Account.Isolation)
+	fmt.Fprintln(output, "        Pool Accounts:", len(cfg.System.Account.Accounts))
 	fmt.Fprintln(output, "         Server Time:", time.Now().Format(time.RFC1123Z))
 	fmt.Fprintln(output, "          Debug Mode:", cfg.Debug)
 
-	printHeader(output, "Docker: Info")
-	if dockerErr == nil {
-		fmt.Fprintln(output, "Server Version:", dockerInfo.ServerVersion)
-		fmt.Fprintln(output, "Storage Driver:", dockerInfo.Driver)
-		if dockerInfo.DriverStatus != nil {
-			for _, pair := range dockerInfo.DriverStatus {
-				fmt.Fprintf(output, "  %s: %s\n", pair[0], pair[1])
-			}
+	printHeader(output, "Runtime")
+	fmt.Fprintln(output, "        Process Limit:", cfg.Runtime.ProcessLimit)
+	fmt.Fprintln(output, "         CPU Hard Cap:", cfg.Runtime.CpuHardCap)
+	fmt.Fprintln(output, "        Bind Address:", cfg.Runtime.BindAddress)
+	fmt.Fprintln(output, "  Console PseudoConsole:", cfg.Runtime.Console.PseudoConsole)
+	if exe, err := os.Executable(); err == nil {
+		wp := filepath.Join(filepath.Dir(exe), "winwings-worker.exe")
+		if _, err := os.Stat(wp); err == nil {
+			fmt.Fprintln(output, "       Worker Binary:", wp)
+		} else {
+			fmt.Fprintln(output, "       Worker Binary: MISSING at", wp)
 		}
-		if dockerInfo.SystemStatus != nil {
-			for _, pair := range dockerInfo.SystemStatus {
-				fmt.Fprintf(output, " %s: %s\n", pair[0], pair[1])
-			}
-		}
-		fmt.Fprintln(output, "LoggingDriver:", dockerInfo.LoggingDriver)
-		fmt.Fprintln(output, " CgroupDriver:", dockerInfo.CgroupDriver)
-		if len(dockerInfo.Warnings) > 0 {
-			for _, w := range dockerInfo.Warnings {
-				fmt.Fprintln(output, w)
-			}
-		}
-	} else {
-		fmt.Fprintln(output, dockerErr.Error())
 	}
 
-	printHeader(output, "Docker: Running Containers")
-	c := exec.Command("docker", "ps")
-	if co, err := c.Output(); err == nil {
-		output.Write(co)
+	printHeader(output, "Running Workers")
+	if entries, err := os.ReadDir(cfg.System.InstanceDirectory); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			pipe := `\\.\pipe\winwings-` + e.Name()
+			state := "stopped"
+			if _, err := os.Stat(pipe); err == nil {
+				state = "running"
+			}
+			fmt.Fprintf(output, "  %s  %s\n", e.Name(), state)
+		}
 	} else {
-		fmt.Fprint(output, "Couldn't list containers: ", err)
+		fmt.Fprintln(output, "  could not read the instance directory:", err)
 	}
 
 	printHeader(output, "Latest Wings Logs")
 	if diagnosticsArgs.IncludeLogs {
-		p := "/var/log/pterodactyl/wings.log"
-		if cfg != nil {
-			p = path.Join(cfg.System.LogDirectory, "wings.log")
-		}
-		if c, err := exec.Command("tail", "-n", strconv.Itoa(diagnosticsArgs.LogLines), p).Output(); err != nil {
-			fmt.Fprintln(output, "No logs found or an error occurred.")
+		p := filepath.Join(cfg.System.LogDirectory, "wings.log")
+		if c, err := tailFile(p, diagnosticsArgs.LogLines); err != nil {
+			fmt.Fprintln(output, "No logs found or an error occurred:", err)
 		} else {
-			fmt.Fprintf(output, "%s\n", string(c))
+			fmt.Fprintf(output, "%s\n", c)
 		}
 	} else {
 		fmt.Fprintln(output, "Logs redacted.")
@@ -207,20 +192,57 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	}
 }
 
-func getDockerInfo() (types.Version, dockersystem.Info, error) {
-	client, err := environment.Docker()
+// tailFile returns the last n lines of a file.
+//
+// Upstream shelled out to tail(1), which does not exist on Windows. Reads a
+// bounded window from the end rather than the whole file, since a busy node's
+// log can be large.
+func tailFile(path string, n int) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return types.Version{}, dockersystem.Info{}, err
+		return "", err
 	}
-	dockerVersion, err := client.ServerVersion(context.Background())
+	defer f.Close()
+
+	st, err := f.Stat()
 	if err != nil {
-		return types.Version{}, dockersystem.Info{}, err
+		return "", err
 	}
-	dockerInfo, err := client.Info(context.Background())
+
+	const maxTail = 1 << 20
+	offset := int64(0)
+	if st.Size() > maxTail {
+		offset = st.Size() - maxTail
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	b, err := io.ReadAll(f)
 	if err != nil {
-		return types.Version{}, dockersystem.Info{}, err
+		return "", err
 	}
-	return dockerVersion, dockerInfo, nil
+
+	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// windowsVersion reports the host OS build.
+func windowsVersion() (string, error) {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		return "", err
+	}
+	defer k.Close()
+
+	product, _, _ := k.GetStringValue("ProductName")
+	build, _, _ := k.GetStringValue("CurrentBuildNumber")
+	ubr, _, _ := k.GetIntegerValue("UBR")
+	return fmt.Sprintf("%s (build %s.%d)", product, build, ubr), nil
 }
 
 func uploadToHastebin(hbUrl, content string) (string, error) {

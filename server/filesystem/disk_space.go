@@ -1,8 +1,6 @@
 package filesystem
 
 import (
-	"golang.org/x/sys/unix"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,7 +8,7 @@ import (
 	"emperror.dev/errors"
 	"github.com/apex/log"
 
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 type SpaceCheckingOpts struct {
@@ -41,12 +39,12 @@ func (ult *usageLookupTime) Get() time.Time {
 // MaxDisk returns the maximum amount of disk space that this Filesystem
 // instance is allowed to use.
 func (fs *Filesystem) MaxDisk() int64 {
-	return fs.unixFS.Limit()
+	return fs.winFS.Limit()
 }
 
 // SetDiskLimit sets the disk space limit for this Filesystem instance.
 func (fs *Filesystem) SetDiskLimit(i int64) {
-	fs.unixFS.SetLimit(i)
+	fs.winFS.SetLimit(i)
 }
 
 // The same concept as HasSpaceAvailable however this will return an error if there is
@@ -88,7 +86,7 @@ func (fs *Filesystem) HasSpaceAvailable(allowStaleValue bool) bool {
 // function for critical logical checks. It should only be used in areas where the actual disk usage
 // does not need to be perfect, e.g. API responses for server resource usage.
 func (fs *Filesystem) CachedUsage() int64 {
-	return fs.unixFS.Usage()
+	return fs.winFS.Usage()
 }
 
 // Internal helper function to allow other parts of the codebase to check the total used disk space
@@ -125,7 +123,7 @@ func (fs *Filesystem) DiskUsage(allowStaleValue bool) (int64, error) {
 	}
 
 	// Return the currently cached value back to the calling function.
-	return fs.unixFS.Usage(), nil
+	return fs.winFS.Usage(), nil
 }
 
 // Updates the currently used disk space for a server.
@@ -153,23 +151,21 @@ func (fs *Filesystem) updateCachedDiskUsage() (int64, error) {
 	// error encountered.
 	fs.lastLookupTime.Set(time.Now())
 
-	fs.unixFS.SetUsage(size)
+	fs.winFS.SetUsage(size)
 
 	return size, err
 }
 
 // DirectorySize calculates the size of a directory and its descendants.
 func (fs *Filesystem) DirectorySize(root string) (int64, error) {
-	dirfd, name, closeFd, err := fs.unixFS.SafePath(root)
+	dir, name, closeFd, err := fs.winFS.SafeDir(root)
 	defer closeFd()
 	if err != nil {
 		return 0, err
 	}
 
-	var hardLinks []uint64
-
 	var size atomic.Int64
-	err = fs.unixFS.WalkDirat(dirfd, name, func(dirfd int, name, _ string, d ufs.DirEntry, err error) error {
+	err = dir.WalkFrom(name, func(dir *winfs.Dir, name, _ string, d winfs.DirEntry, err error) error {
 		if err != nil {
 			return errors.Wrap(err, "walkdirat err")
 		}
@@ -179,22 +175,21 @@ func (fs *Filesystem) DirectorySize(root string) (int64, error) {
 			return nil
 		}
 
-		info, err := fs.unixFS.Lstatat(dirfd, name)
+		info, err := dir.Lstat(name)
 		if err != nil {
 			return errors.Wrap(err, "lstatat err")
 		}
 
-		var sysFileInfo = info.Sys().(*unix.Stat_t)
-		if sysFileInfo.Nlink > 1 {
-			// Hard links have the same inode number
-			if slices.Contains(hardLinks, sysFileInfo.Ino) {
-				// Don't add hard links size twice
-				return nil
-			} else {
-				hardLinks = append(hardLinks, sysFileInfo.Ino)
-			}
-		}
-
+		// Upstream de-duplicated hard links here using the inode number and link
+		// count from lstat. Windows exposes neither through os.FileInfo: the link
+		// count and file index are only available via GetFileInformationByHandle,
+		// which would mean opening every file during a disk usage walk of a server
+		// that may hold hundreds of thousands of them.
+		//
+		// The trade made here is to over-count hard-linked files rather than pay
+		// that cost. Hard links are rare in game server directories, and the
+		// consequence is a disk usage figure that is too high, never too low — so
+		// a server is never allowed past its quota because of this.
 		size.Add(info.Size())
 		return nil
 	})
@@ -202,7 +197,7 @@ func (fs *Filesystem) DirectorySize(root string) (int64, error) {
 }
 
 func (fs *Filesystem) HasSpaceFor(size int64) error {
-	if !fs.unixFS.CanFit(size) {
+	if !fs.winFS.CanFit(size) {
 		return newFilesystemError(ErrCodeDiskSpace, nil)
 	}
 	return nil
@@ -219,7 +214,7 @@ func (fs *Filesystem) reserveDisk(size int64) error {
 	if err := fs.HasSpaceFor(size); err != nil {
 		return err
 	}
-	fs.unixFS.Add(size)
+	fs.winFS.Add(size)
 	return nil
 }
 
@@ -231,10 +226,10 @@ func (fs *Filesystem) adjustDisk(size int64) int64 {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	return fs.unixFS.Add(size)
+	return fs.winFS.Add(size)
 }
 
 // Updates the disk usage for the Filesystem instance.
 func (fs *Filesystem) addDisk(i int64) int64 {
-	return fs.unixFS.Add(i)
+	return fs.winFS.Add(i)
 }

@@ -18,11 +18,11 @@ import (
 	ignore "github.com/sabhiram/go-gitignore"
 
 	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 type Filesystem struct {
-	unixFS *ufs.Quota
+	winFS *winfs.FS
 
 	mu                sync.RWMutex
 	lastLookupTime    *usageLookupTime
@@ -38,14 +38,13 @@ func New(root string, size int64, denylist []string) (*Filesystem, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	unixFS, err := ufs.NewUnixFS(root, config.UseOpenat2())
+	winFS, err := winfs.New(root, size)
 	if err != nil {
 		return nil, err
 	}
-	quota := ufs.NewQuota(unixFS, size)
 
 	return &Filesystem{
-		unixFS: quota,
+		winFS: winFS,
 
 		diskCheckInterval: time.Duration(config.Get().System.DiskCheckInterval),
 		lastLookupTime:    &usageLookupTime{},
@@ -55,25 +54,25 @@ func New(root string, size int64, denylist []string) (*Filesystem, error) {
 
 // Path returns the root path for the Filesystem instance.
 func (fs *Filesystem) Path() string {
-	return fs.unixFS.BasePath()
+	return fs.winFS.BasePath()
 }
 
 // ReadDir reads directory entries.
-func (fs *Filesystem) ReadDir(path string) ([]ufs.DirEntry, error) {
-	return fs.unixFS.ReadDir(path)
+func (fs *Filesystem) ReadDir(path string) ([]winfs.DirEntry, error) {
+	return fs.winFS.ReadDir(path)
 }
 
 // ReadDirStat is like ReadDir except that it returns FileInfo for each entry
 // instead of just a DirEntry.
-func (fs *Filesystem) ReadDirStat(path string) ([]ufs.FileInfo, error) {
-	return ufs.ReadDirMap(fs.unixFS.UnixFS, path, func(e ufs.DirEntry) (ufs.FileInfo, error) {
+func (fs *Filesystem) ReadDirStat(path string) ([]winfs.FileInfo, error) {
+	return winfs.ReadDirMap(fs.winFS, path, func(e winfs.DirEntry) (winfs.FileInfo, error) {
 		return e.Info()
 	})
 }
 
 // File returns a reader for a file instance as well as the stat information.
-func (fs *Filesystem) File(p string) (ufs.File, Stat, error) {
-	f, err := fs.unixFS.Open(p)
+func (fs *Filesystem) File(p string) (winfs.File, Stat, error) {
+	f, err := fs.winFS.Open(p)
 	if err != nil {
 		return nil, Stat{}, err
 	}
@@ -85,23 +84,24 @@ func (fs *Filesystem) File(p string) (ufs.File, Stat, error) {
 	return f, st, nil
 }
 
-func (fs *Filesystem) UnixFS() *ufs.UnixFS {
-	return fs.unixFS.UnixFS
+// WinFS exposes the underlying sandboxed filesystem.
+func (fs *Filesystem) WinFS() *winfs.FS {
+	return fs.winFS
 }
 
 // Touch acts by creating the given file and path on the disk if it is not present
 // already. If  it is present, the file is opened using the defaults which will truncate
 // the contents. The opened file is then returned to the caller.
-func (fs *Filesystem) Touch(p string, flag int) (ufs.File, error) {
+func (fs *Filesystem) Touch(p string, flag int) (winfs.File, error) {
 	var currentSize int64
-	st, err := fs.unixFS.Stat(p)
-	if err != nil && !errors.Is(err, ufs.ErrNotExist) {
+	st, err := fs.winFS.Stat(p)
+	if err != nil && !errors.Is(err, winfs.ErrNotExist) {
 		return nil, err
 	} else if err == nil && !st.IsDir() {
 		currentSize = st.Size()
 	}
 
-	file, err := fs.unixFS.Touch(p, flag, 0o644)
+	file, err := fs.winFS.Touch(p, flag, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +115,8 @@ func (fs *Filesystem) Touch(p string, flag int) (ufs.File, error) {
 // DEPRECATED: use `Write` instead.
 func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 	var currentSize int64
-	st, err := fs.unixFS.Stat(p)
-	if err != nil && !errors.Is(err, ufs.ErrNotExist) {
+	st, err := fs.winFS.Stat(p)
+	if err != nil && !errors.Is(err, winfs.ErrNotExist) {
 		return errors.Wrap(err, "server/filesystem: writefile: failed to stat file")
 	} else if err == nil {
 		if st.IsDir() {
@@ -129,7 +129,7 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 	// Touch the file and return the handle to it at this point. This will
 	// create or truncate the file, and create any necessary parent directories
 	// if they are missing.
-	file, err := fs.unixFS.Touch(p, ufs.O_RDWR|ufs.O_TRUNC, 0o644)
+	file, err := fs.winFS.Touch(p, winfs.O_RDWR|winfs.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("error touching file: %w", err)
 	}
@@ -140,7 +140,7 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 	n, err := io.Copy(file, r)
 
 	// Adjust the disk usage to account for the old size and the new size of the file.
-	fs.unixFS.Add(n - currentSize)
+	fs.winFS.Add(n - currentSize)
 
 	if err := fs.chownFile(p); err != nil {
 		return fmt.Errorf("error chowning file: %w", err)
@@ -149,10 +149,10 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 	return err
 }
 
-func (fs *Filesystem) Write(p string, r io.Reader, newSize int64, mode ufs.FileMode) error {
+func (fs *Filesystem) Write(p string, r io.Reader, newSize int64, mode winfs.FileMode) error {
 	var currentSize int64
-	st, err := fs.unixFS.Stat(p)
-	if err != nil && !errors.Is(err, ufs.ErrNotExist) {
+	st, err := fs.winFS.Stat(p)
+	if err != nil && !errors.Is(err, winfs.ErrNotExist) {
 		return errors.Wrap(err, "server/filesystem: writefile: failed to stat file")
 	} else if err == nil {
 		if st.IsDir() {
@@ -180,7 +180,7 @@ func (fs *Filesystem) Write(p string, r io.Reader, newSize int64, mode ufs.FileM
 	// Touch the file and return the handle to it at this point. This will
 	// create or truncate the file, and create any necessary parent directories
 	// if they are missing.
-	file, err := fs.unixFS.Touch(p, ufs.O_RDWR|ufs.O_TRUNC, mode)
+	file, err := fs.winFS.Touch(p, winfs.O_RDWR|winfs.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func (fs *Filesystem) Write(p string, r io.Reader, newSize int64, mode ufs.FileM
 
 	if newSize == 0 {
 		// Subtract the previous size of the file if the new size is 0.
-		fs.unixFS.Add(-currentSize)
+		fs.winFS.Add(-currentSize)
 	} else {
 		// Do not use CopyBuffer here, it is wasteful as the file implements
 		// io.ReaderFrom, which causes it to not use the buffer anyways.
@@ -196,7 +196,7 @@ func (fs *Filesystem) Write(p string, r io.Reader, newSize int64, mode ufs.FileM
 		n, err = io.Copy(file, io.LimitReader(r, newSize))
 
 		// Adjust the disk usage to account for the old size and the new size of the file.
-		fs.unixFS.Add(n - currentSize)
+		fs.winFS.Add(n - currentSize)
 	}
 
 	if err := fs.chownFile(p); err != nil {
@@ -213,89 +213,43 @@ func (fs *Filesystem) CreateDirectory(name string, p string) error {
 }
 
 func (fs *Filesystem) Rename(oldpath, newpath string) error {
-	return fs.unixFS.Rename(oldpath, newpath)
+	return fs.winFS.Rename(oldpath, newpath)
 }
 
 func (fs *Filesystem) Symlink(oldpath, newpath string) error {
-	return fs.unixFS.Symlink(oldpath, newpath)
+	return fs.winFS.Symlink(oldpath, newpath)
 }
 
-func (fs *Filesystem) chownFile(name string) error {
-	if fs.isTest {
-		return nil
-	}
-
-	uid := config.Get().System.User.Uid
-	gid := config.Get().System.User.Gid
-	return fs.unixFS.Lchown(name, uid, gid)
-}
-
-// mkdirAll creates the directory p along with any missing parents, chowning
-// every directory it creates to the server user so they are not left owned by
-// the user Wings runs as.
-func (fs *Filesystem) mkdirAll(p string, mode ufs.FileMode) error {
-	created, err := fs.unixFS.MkdirAll(p, mode)
-	if err != nil {
-		return err
-	}
-	for _, dir := range created {
-		if err := fs.chownFile(dir); err != nil {
-			return err
-		}
-	}
+// chownFile is a no-op on Windows.
+//
+// Upstream chowned every file it created to the server's uid/gid so that files
+// were not left owned by the account wings ran as. Windows has no equivalent
+// worth performing per-file: a new file inherits its parent directory's ACL, and
+// server separation is achieved by giving each server's data directory an ACL
+// naming that server's own local account. Walking a large server tree to stamp
+// ownership on every file would be expensive and would change nothing.
+//
+// See config.AccountConfiguration for the isolation model this replaces.
+func (fs *Filesystem) chownFile(_ string) error {
 	return nil
 }
 
-// Chown recursively iterates over a file or directory and sets the permissions on all of the
-// underlying files. Iterate over all of the files and directories. If it is a file just
-// go ahead and perform the chown operation. Otherwise dig deeper into the directory until
-// we've run out of directories to dig into.
-func (fs *Filesystem) Chown(p string) error {
-	if fs.isTest {
-		return nil
-	}
+// mkdirAll creates the directory p along with any missing parents.
+func (fs *Filesystem) mkdirAll(p string, mode winfs.FileMode) error {
+	return fs.winFS.MkdirAll(p, mode)
+}
 
-	uid := config.Get().System.User.Uid
-	gid := config.Get().System.User.Gid
-
-	dirfd, name, closeFd, err := fs.unixFS.SafePath(p)
-	defer closeFd()
-	if err != nil {
-		return err
-	}
-
-	// Start by just chowning the initial path that we received.
-	if err := fs.unixFS.Lchownat(dirfd, name, uid, gid); err != nil {
-		return errors.Wrap(err, "server/filesystem: chown: failed to chown path")
-	}
-
-	// If this is not a directory we can now return from the function, there is nothing
-	// left that we need to do.
-	if st, err := fs.unixFS.Lstatat(dirfd, name); err != nil || !st.IsDir() {
-		return nil
-	}
-
-	// This walker is probably some of the most efficient code in Wings. It has
-	// an internally re-used buffer for listing directory entries and doesn't
-	// need to check if every individual path it touches is safe as the code
-	// doesn't traverse symlinks, is immune to symlink timing attacks, and
-	// gives us a dirfd and file name to make a direct syscall with.
-	if err := fs.unixFS.WalkDirat(dirfd, name, func(dirfd int, name, _ string, info ufs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if err := fs.unixFS.Lchownat(dirfd, name, uid, gid); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("server/filesystem: chown: failed to chown during walk function: %w", err)
-	}
+// Chown is a no-op on Windows.
+//
+// It is kept because the Panel triggers it and the router exposes it. See
+// chownFile for why there is nothing to do: file ownership is not the mechanism
+// that separates servers here, directory ACLs are.
+func (fs *Filesystem) Chown(_ string) error {
 	return nil
 }
 
-func (fs *Filesystem) Chmod(path string, mode ufs.FileMode) error {
-	return fs.unixFS.Chmod(path, mode)
+func (fs *Filesystem) Chmod(path string, mode winfs.FileMode) error {
+	return fs.winFS.Chmod(path, mode)
 }
 
 // Begin looping up to 50 times to try and create a unique copy file name. This will take
@@ -306,7 +260,7 @@ func (fs *Filesystem) Chmod(path string, mode ufs.FileMode) error {
 // Could probably make this more efficient by checking if there are any files matching the copy
 // pattern, and trying to find the highest number and then incrementing it by one rather than
 // looping endlessly.
-func (fs *Filesystem) findCopySuffix(dirfd int, name, extension string) (string, error) {
+func (fs *Filesystem) findCopySuffix(dir *winfs.Dir, name, extension string) (string, error) {
 	var i int
 	suffix := " copy"
 
@@ -318,8 +272,8 @@ func (fs *Filesystem) findCopySuffix(dirfd int, name, extension string) (string,
 		n := name + suffix + extension
 		// If we stat the file and it does not exist that means we're good to create the copy. If it
 		// does exist, we'll just continue to the next loop and try again.
-		if _, err := fs.unixFS.Lstatat(dirfd, n); err != nil {
-			if !errors.Is(err, ufs.ErrNotExist) {
+		if _, err := dir.Lstat(n); err != nil {
+			if !errors.Is(err, winfs.ErrNotExist) {
 				return "", err
 			}
 			break
@@ -336,12 +290,12 @@ func (fs *Filesystem) findCopySuffix(dirfd int, name, extension string) (string,
 // Copy copies a given file to the same location and appends a suffix to the
 // file to indicate that it has been copied.
 func (fs *Filesystem) Copy(p string) error {
-	dirfd, name, closeFd, err := fs.unixFS.SafePath(p)
+	dir, name, closeFd, err := fs.winFS.SafeDir(p)
 	defer closeFd()
 	if err != nil {
 		return err
 	}
-	source, err := fs.unixFS.OpenFileat(dirfd, name, ufs.O_RDONLY, 0)
+	source, err := dir.OpenFile(name, winfs.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
@@ -353,7 +307,7 @@ func (fs *Filesystem) Copy(p string) error {
 	if info.IsDir() || !info.Mode().IsRegular() {
 		// If this is a directory or not a regular file, just throw a not-exist error
 		// since anything calling this function should understand what that means.
-		return ufs.ErrNotExist
+		return winfs.ErrNotExist
 	}
 	currentSize := info.Size()
 
@@ -374,11 +328,11 @@ func (fs *Filesystem) Copy(p string) error {
 		baseName = strings.TrimSuffix(baseName, ".tar")
 	}
 
-	newName, err := fs.findCopySuffix(dirfd, baseName, extension)
+	newName, err := fs.findCopySuffix(dir, baseName, extension)
 	if err != nil {
 		return err
 	}
-	dst, err := fs.unixFS.OpenFileat(dirfd, newName, ufs.O_WRONLY|ufs.O_CREATE, info.Mode())
+	dst, err := dir.OpenFile(newName, winfs.O_WRONLY|winfs.O_CREATE, info.Mode())
 	if err != nil {
 		return err
 	}
@@ -387,45 +341,60 @@ func (fs *Filesystem) Copy(p string) error {
 	// Do not use CopyBuffer here, it is wasteful as the file implements
 	// io.ReaderFrom, which causes it to not use the buffer anyways.
 	n, err := io.Copy(dst, io.LimitReader(source, currentSize))
-	fs.unixFS.Add(n)
+	fs.winFS.Add(n)
 
-	if !fs.isTest {
-		if err := fs.unixFS.Lchownat(dirfd, newName, config.Get().System.User.Uid, config.Get().System.User.Gid); err != nil {
-			return err
-		}
-	}
-	// Return the error from io.Copy.
+	// Return the error from io.Copy. Nothing to chown: the copy inherits the
+	// destination directory's ACL, which is the server's own.
 	return err
 }
 
 // TruncateRootDirectory removes _all_ files and directories from a server's
 // data directory and resets the used disk space to zero.
 func (fs *Filesystem) TruncateRootDirectory() error {
+	var limit int64
+	if !fs.isTest {
+		limit = fs.winFS.Limit()
+	}
+
+	// The sandbox handle must be released before the directory can be removed.
+	//
+	// Upstream removed the tree first and closed afterwards, which is fine on
+	// Linux where an open handle does not prevent unlinking. Windows refuses to
+	// delete a directory that anything still holds open, so that order fails
+	// here with a sharing violation.
+	if err := fs.winFS.Close(); err != nil {
+		return err
+	}
+
 	if err := os.RemoveAll(fs.Path()); err != nil {
 		return err
 	}
 	if err := os.Mkdir(fs.Path(), 0o755); err != nil {
 		return err
 	}
-	_ = fs.unixFS.Close()
-	unixFS, err := ufs.NewUnixFS(fs.Path(), config.UseOpenat2())
+
+	winFS, err := winfs.New(fs.Path(), limit)
 	if err != nil {
 		return err
 	}
-	var limit int64
-	if fs.isTest {
-		limit = 0
-	} else {
-		limit = fs.unixFS.Limit()
-	}
-	fs.unixFS = ufs.NewQuota(unixFS, limit)
+	fs.winFS = winFS
+	fs.winFS.SetUsage(0)
 	return nil
+}
+
+// Close releases the filesystem's sandbox handle.
+//
+// Callers that create a Filesystem for a short-lived purpose must call this.
+// Windows will not allow the server's directory to be renamed or deleted while
+// the handle is open, so leaking one blocks transfers and deletions.
+func (fs *Filesystem) Close() error {
+	return fs.winFS.Close()
 }
 
 // Delete removes a file or folder from the system. Prevents the user from
 // accidentally (or maliciously) removing their root server data directory.
 func (fs *Filesystem) Delete(p string) error {
-	return fs.unixFS.RemoveAll(p)
+	return fs.winFS.RemoveAll(p)
 }
 
 //type fileOpener struct {
@@ -436,9 +405,9 @@ func (fs *Filesystem) Delete(p string) error {
 //// Attempts to open a given file up to "attempts" number of times, using a backoff. If the file
 //// cannot be opened because of a "text file busy" error, we will attempt until the number of attempts
 //// has been exhaused, at which point we will abort with an error.
-//func (fo *fileOpener) open(path string, flags int, perm ufs.FileMode) (ufs.File, error) {
+//func (fo *fileOpener) open(path string, flags int, perm winfs.FileMode) (winfs.File, error) {
 //	for {
-//		f, err := fo.fs.unixFS.OpenFile(path, flags, perm)
+//		f, err := fo.fs.winFS.OpenFile(path, flags, perm)
 //
 //		// If there is an error because the text file is busy, go ahead and sleep for a few
 //		// hundred milliseconds and then try again up to three times before just returning the
@@ -460,7 +429,7 @@ func (fs *Filesystem) Delete(p string) error {
 func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 	// Read entries from the path on the filesystem, using the mapped reader, so
 	// we can map the DirEntry slice into a Stat slice with mimetype information.
-	out, err := ufs.ReadDirMap(fs.unixFS.UnixFS, p, func(e ufs.DirEntry) (Stat, error) {
+	out, err := winfs.ReadDirMap(fs.winFS, p, func(e winfs.DirEntry) (Stat, error) {
 		info, err := e.Info()
 		if err != nil {
 			return Stat{}, err
@@ -476,7 +445,7 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 		if e.Type().IsRegular() {
 			// TODO: I should probably find a better way to do this.
 			eO := e.(interface {
-				Open() (ufs.File, error)
+				Open() (winfs.File, error)
 			})
 			f, err := eO.Open()
 			if err != nil {
@@ -530,5 +499,5 @@ func (fs *Filesystem) Chtimes(path string, atime, mtime time.Time) error {
 	if fs.isTest {
 		return nil
 	}
-	return fs.unixFS.Chtimes(path, atime, mtime)
+	return fs.winFS.Chtimes(path, atime, mtime)
 }

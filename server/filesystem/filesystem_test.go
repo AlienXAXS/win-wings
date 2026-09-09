@@ -13,7 +13,7 @@ import (
 
 	. "github.com/franela/goblin"
 
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 
 	"github.com/pterodactyl/wings/config"
 )
@@ -55,7 +55,7 @@ type rootFs struct {
 	root string
 }
 
-func getFileContent(file ufs.File) string {
+func getFileContent(file winfs.File) string {
 	var w bytes.Buffer
 	if _, err := bufio.NewReader(file).WriteTo(&w); err != nil {
 		panic(err)
@@ -80,6 +80,32 @@ func (rfs *rootFs) CreateServerFileFromString(p string, c string) error {
 
 func (rfs *rootFs) StatServerFile(p string) (os.FileInfo, error) {
 	return os.Stat(filepath.Join(rfs.root, "server", p))
+}
+
+// canSymlink reports whether this host permits creating symbolic links.
+//
+// Windows requires either administrator rights or Developer Mode to create one.
+// The tests that depend on symlinks assert that the sandbox refuses to follow a
+// link pointing outside the root; where links cannot be created those assertions
+// cannot run, so they are skipped rather than reported as failures.
+//
+// The same escape class is covered without any privilege by the junction tests
+// in internal/winfs/os_root_probe_test.go. Junctions are in fact the more
+// important case, since any unprivileged user can create one.
+var symlinksSupported = canSymlink()
+
+func canSymlink() bool {
+	dir, err := os.MkdirTemp("", "winwings-symlink-probe")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		return false
+	}
+	return os.Symlink(target, filepath.Join(dir, "link")) == nil
 }
 
 func TestFilesystem_Openfile(t *testing.T) {
@@ -120,7 +146,7 @@ func TestFilesystem_Touch(t *testing.T) {
 		g.It("enforces disk limits while writing to the returned handle", func() {
 			fs.SetDiskLimit(10)
 
-			f, err := fs.Touch("quota.txt", ufs.O_RDWR|ufs.O_TRUNC)
+			f, err := fs.Touch("quota.txt", winfs.O_RDWR|winfs.O_TRUNC)
 			g.Assert(err).IsNil()
 			defer f.Close()
 
@@ -139,7 +165,7 @@ func TestFilesystem_Touch(t *testing.T) {
 		g.It("enforces disk limits while sequentially writing to the returned handle", func() {
 			fs.SetDiskLimit(10)
 
-			f, err := fs.Touch("quota.txt", ufs.O_RDWR|ufs.O_TRUNC)
+			f, err := fs.Touch("quota.txt", winfs.O_RDWR|winfs.O_TRUNC)
 			g.Assert(err).IsNil()
 			defer f.Close()
 
@@ -160,7 +186,7 @@ func TestFilesystem_Touch(t *testing.T) {
 			g.Assert(err).IsNil()
 			g.Assert(fs.CachedUsage()).Equal(int64(10))
 
-			f, err := fs.Touch("quota.txt", ufs.O_RDWR|ufs.O_TRUNC)
+			f, err := fs.Touch("quota.txt", winfs.O_RDWR|winfs.O_TRUNC)
 			g.Assert(err).IsNil()
 
 			n, err := f.WriteAt([]byte("1234"), 0)
@@ -175,9 +201,9 @@ func TestFilesystem_Touch(t *testing.T) {
 		g.It("does not reset disk usage after a failed huge-offset write", func() {
 			const usage = int64(5 * 1024 * 1024)
 			fs.SetDiskLimit(10 * 1024 * 1024)
-			fs.unixFS.SetUsage(usage)
+			fs.winFS.SetUsage(usage)
 
-			f, err := fs.Touch("quota.txt", ufs.O_RDWR|ufs.O_TRUNC)
+			f, err := fs.Touch("quota.txt", winfs.O_RDWR|winfs.O_TRUNC)
 			g.Assert(err).IsNil()
 
 			n, err := f.WriteAt([]byte("x"), math.MaxInt64)
@@ -248,7 +274,7 @@ func TestFilesystem_Writefile(t *testing.T) {
 
 			err := fs.Write("/some/../foo/../../test.txt", r, r.Size(), 0o644)
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("cannot write a file that exceeds the disk limits", func() {
@@ -267,7 +293,7 @@ func TestFilesystem_Writefile(t *testing.T) {
 
 		g.It("cannot write a file whose claimed size overflows the quota check", func() {
 			fs.SetDiskLimit(1024)
-			fs.unixFS.SetUsage(1)
+			fs.winFS.SetUsage(1)
 
 			r := bytes.NewReader([]byte("small body"))
 			err := fs.Write("overflow.txt", r, math.MaxInt64, 0o644)
@@ -328,7 +354,7 @@ func TestFilesystem_CreateDirectory(t *testing.T) {
 		g.It("should not allow the creation of directories outside the root", func() {
 			err := fs.CreateDirectory("test", "e/../../something")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("should not increment the disk usage", func() {
@@ -360,25 +386,25 @@ func TestFilesystem_Rename(t *testing.T) {
 
 			err = fs.Rename("source.txt", "target.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrExist)).IsTrue("err is not ErrExist")
+			g.Assert(errors.Is(err, winfs.ErrExist)).IsTrue("err is not ErrExist")
 		})
 
 		g.It("returns an error if the final destination is the root directory", func() {
 			err := fs.Rename("source.txt", "/")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("returns an error if the source destination is the root directory", func() {
 			err := fs.Rename("/", "target.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("does not allow renaming to a location outside the root", func() {
 			err := fs.Rename("source.txt", "../target.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("does not allow renaming from a location outside the root", func() {
@@ -386,7 +412,7 @@ func TestFilesystem_Rename(t *testing.T) {
 
 			err = fs.Rename("/../ext-source.txt", "target.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("allows a file to be renamed", func() {
@@ -395,7 +421,7 @@ func TestFilesystem_Rename(t *testing.T) {
 
 			_, err = rfs.StatServerFile("source.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 
 			st, err := rfs.StatServerFile("target.txt")
 			g.Assert(err).IsNil()
@@ -412,7 +438,7 @@ func TestFilesystem_Rename(t *testing.T) {
 
 			_, err = rfs.StatServerFile("source_dir")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 
 			st, err := rfs.StatServerFile("target_dir")
 			g.Assert(err).IsNil()
@@ -422,7 +448,7 @@ func TestFilesystem_Rename(t *testing.T) {
 		g.It("returns an error if the source does not exist", func() {
 			err := fs.Rename("missing.txt", "target.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 		})
 
 		g.It("creates directories if they are missing", func() {
@@ -450,13 +476,13 @@ func TestFilesystem_Copy(t *testing.T) {
 				panic(err)
 			}
 
-			fs.unixFS.SetUsage(int64(utf8.RuneCountInString("test content")))
+			fs.winFS.SetUsage(int64(utf8.RuneCountInString("test content")))
 		})
 
 		g.It("should return an error if the source does not exist", func() {
 			err := fs.Copy("foo.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 		})
 
 		g.It("should return an error if the source is outside the root", func() {
@@ -464,7 +490,7 @@ func TestFilesystem_Copy(t *testing.T) {
 
 			err = fs.Copy("../ext-source.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("should return an error if the source directory is outside the root", func() {
@@ -476,11 +502,11 @@ func TestFilesystem_Copy(t *testing.T) {
 
 			err = fs.Copy("../nested/in/dir/ext-source.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 
 			err = fs.Copy("nested/in/../../../nested/in/dir/ext-source.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("should return an error if the source is a directory", func() {
@@ -489,7 +515,7 @@ func TestFilesystem_Copy(t *testing.T) {
 
 			err = fs.Copy("dir")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 		})
 
 		g.It("should return an error if there is not space to copy the file", func() {
@@ -561,7 +587,7 @@ func TestFilesystem_Delete(t *testing.T) {
 				panic(err)
 			}
 
-			fs.unixFS.SetUsage(int64(utf8.RuneCountInString("test content")))
+			fs.winFS.SetUsage(int64(utf8.RuneCountInString("test content")))
 		})
 
 		g.It("does not delete files outside the root directory", func() {
@@ -569,13 +595,13 @@ func TestFilesystem_Delete(t *testing.T) {
 
 			err = fs.Delete("../ext-source.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("does not allow the deletion of the root directory", func() {
 			err := fs.Delete("/")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 		})
 
 		g.It("does not return an error if the target does not exist", func() {
@@ -593,7 +619,7 @@ func TestFilesystem_Delete(t *testing.T) {
 
 			_, err = rfs.StatServerFile("source.txt")
 			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+			g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 
 			g.Assert(fs.CachedUsage()).Equal(int64(0))
 		})
@@ -613,92 +639,100 @@ func TestFilesystem_Delete(t *testing.T) {
 				g.Assert(err).IsNil()
 			}
 
-			fs.unixFS.SetUsage(int64(utf8.RuneCountInString("test content") * 3))
+			fs.winFS.SetUsage(int64(utf8.RuneCountInString("test content") * 3))
 
 			err = fs.Delete("foo")
 			g.Assert(err).IsNil()
-			g.Assert(fs.unixFS.Usage()).Equal(int64(0))
+			g.Assert(fs.winFS.Usage()).Equal(int64(0))
 
 			for _, s := range sources {
 				_, err = rfs.StatServerFile(s)
 				g.Assert(err).IsNotNil()
-				g.Assert(errors.Is(err, ufs.ErrNotExist)).IsTrue("err is not ErrNotExist")
+				g.Assert(errors.Is(err, winfs.ErrNotExist)).IsTrue("err is not ErrNotExist")
 			}
 		})
 
-		g.It("deletes a symlink but not it's target within the root directory", func() {
-			// Symlink to a file inside the root directory.
-			err := os.Symlink(filepath.Join(rfs.root, "server/source.txt"), filepath.Join(rfs.root, "server/symlink.txt"))
-			g.Assert(err).IsNil()
+		if symlinksSupported {
+			g.It("deletes a symlink but not it's target within the root directory", func() {
+				// Symlink to a file inside the root directory.
+				err := os.Symlink(filepath.Join(rfs.root, "server/source.txt"), filepath.Join(rfs.root, "server/symlink.txt"))
+				g.Assert(err).IsNil()
 
-			// Delete the symlink itself.
-			err = fs.Delete("symlink.txt")
-			g.Assert(err).IsNil()
+				// Delete the symlink itself.
+				err = fs.Delete("symlink.txt")
+				g.Assert(err).IsNil()
 
-			// Ensure the symlink was deleted.
-			_, err = os.Lstat(filepath.Join(rfs.root, "server/symlink.txt"))
-			g.Assert(err).IsNotNil()
+				// Ensure the symlink was deleted.
+				_, err = os.Lstat(filepath.Join(rfs.root, "server/symlink.txt"))
+				g.Assert(err).IsNotNil()
 
-			// Ensure the symlink target still exists.
-			_, err = os.Lstat(filepath.Join(rfs.root, "server/source.txt"))
-			g.Assert(err).IsNil()
-		})
+				// Ensure the symlink target still exists.
+				_, err = os.Lstat(filepath.Join(rfs.root, "server/source.txt"))
+				g.Assert(err).IsNil()
+			})
+		}
 
-		g.It("does not delete files symlinked outside of the root directory", func() {
-			// Create a file outside the root directory.
-			err := rfs.CreateServerFileFromString("/../source.txt", "test content")
-			g.Assert(err).IsNil()
+		if symlinksSupported {
+			g.It("does not delete files symlinked outside of the root directory", func() {
+				// Create a file outside the root directory.
+				err := rfs.CreateServerFileFromString("/../source.txt", "test content")
+				g.Assert(err).IsNil()
 
-			// Create a symlink to the file outside the root directory.
-			err = os.Symlink(filepath.Join(rfs.root, "source.txt"), filepath.Join(rfs.root, "/server/symlink.txt"))
-			g.Assert(err).IsNil()
+				// Create a symlink to the file outside the root directory.
+				err = os.Symlink(filepath.Join(rfs.root, "source.txt"), filepath.Join(rfs.root, "/server/symlink.txt"))
+				g.Assert(err).IsNil()
 
-			// Delete the symlink. (This should pass as we will delete the symlink itself, not it's target)
-			err = fs.Delete("symlink.txt")
-			g.Assert(err).IsNil()
+				// Delete the symlink. (This should pass as we will delete the symlink itself, not it's target)
+				err = fs.Delete("symlink.txt")
+				g.Assert(err).IsNil()
 
-			// Ensure the file outside the root directory still exists.
-			_, err = os.Lstat(filepath.Join(rfs.root, "source.txt"))
-			g.Assert(err).IsNil()
-		})
+				// Ensure the file outside the root directory still exists.
+				_, err = os.Lstat(filepath.Join(rfs.root, "source.txt"))
+				g.Assert(err).IsNil()
+			})
+		}
 
-		g.It("does not delete files symlinked through a directory outside of the root directory", func() {
-			// Create a directory outside the root directory.
-			err := os.Mkdir(filepath.Join(rfs.root, "foo"), 0o755)
-			g.Assert(err).IsNil()
+		if symlinksSupported {
+			g.It("does not delete files symlinked through a directory outside of the root directory", func() {
+				// Create a directory outside the root directory.
+				err := os.Mkdir(filepath.Join(rfs.root, "foo"), 0o755)
+				g.Assert(err).IsNil()
 
-			// Create a file inside the directory that is outside the root.
-			err = rfs.CreateServerFileFromString("/../foo/source.txt", "test content")
-			g.Assert(err).IsNil()
+				// Create a file inside the directory that is outside the root.
+				err = rfs.CreateServerFileFromString("/../foo/source.txt", "test content")
+				g.Assert(err).IsNil()
 
-			// Symlink the directory that is outside the root to a file inside the root.
-			err = os.Symlink(filepath.Join(rfs.root, "foo"), filepath.Join(rfs.root, "server/symlink"))
-			g.Assert(err).IsNil()
+				// Symlink the directory that is outside the root to a file inside the root.
+				err = os.Symlink(filepath.Join(rfs.root, "foo"), filepath.Join(rfs.root, "server/symlink"))
+				g.Assert(err).IsNil()
 
-			// Delete a file inside the symlinked directory.
-			err = fs.Delete("symlink/source.txt")
-			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+				// Delete a file inside the symlinked directory.
+				err = fs.Delete("symlink/source.txt")
+				g.Assert(err).IsNotNil()
+				g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
 
-			// Ensure the file outside the root directory still exists.
-			_, err = os.Lstat(filepath.Join(rfs.root, "foo/source.txt"))
-			g.Assert(err).IsNil()
-		})
+				// Ensure the file outside the root directory still exists.
+				_, err = os.Lstat(filepath.Join(rfs.root, "foo/source.txt"))
+				g.Assert(err).IsNil()
+			})
+		}
 
-		g.It("returns an error when trying to delete a non-existent file symlinked through a directory outside of the root directory", func() {
-			// Create a directory outside the root directory.
-			err := os.Mkdir(filepath.Join(rfs.root, "foo2"), 0o755)
-			g.Assert(err).IsNil()
+		if symlinksSupported {
+			g.It("returns an error when trying to delete a non-existent file symlinked through a directory outside of the root directory", func() {
+				// Create a directory outside the root directory.
+				err := os.Mkdir(filepath.Join(rfs.root, "foo2"), 0o755)
+				g.Assert(err).IsNil()
 
-			// Symlink the directory that is outside the root to a file inside the root.
-			err = os.Symlink(filepath.Join(rfs.root, "foo2"), filepath.Join(rfs.root, "server/symlink"))
-			g.Assert(err).IsNil()
+				// Symlink the directory that is outside the root to a file inside the root.
+				err = os.Symlink(filepath.Join(rfs.root, "foo2"), filepath.Join(rfs.root, "server/symlink"))
+				g.Assert(err).IsNil()
 
-			// Delete a file inside the symlinked directory.
-			err = fs.Delete("symlink/source.txt")
-			g.Assert(err).IsNotNil()
-			g.Assert(errors.Is(err, ufs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
-		})
+				// Delete a file inside the symlinked directory.
+				err = fs.Delete("symlink/source.txt")
+				g.Assert(err).IsNotNil()
+				g.Assert(errors.Is(err, winfs.ErrBadPathResolution)).IsTrue("err is not ErrBadPathResolution")
+			})
+		}
 
 		g.AfterEach(func() {
 			_ = fs.TruncateRootDirectory()

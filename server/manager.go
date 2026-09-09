@@ -17,7 +17,7 @@ import (
 
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/environment/docker"
+	winenv "github.com/pterodactyl/wings/environment/windows"
 	"github.com/pterodactyl/wings/remote"
 	"github.com/pterodactyl/wings/server/filesystem"
 )
@@ -201,9 +201,6 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 		return nil, errors.WithStackIf(err)
 	}
 
-	// Right now we only support a Docker based environment, so I'm going to hard code
-	// this logic in. When we're ready to support other environment we'll need to make
-	// some modifications here, obviously.
 	settings := environment.Settings{
 		Mounts:      s.Mounts(),
 		Allocations: s.cfg.Allocations,
@@ -212,11 +209,18 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 	}
 
 	envCfg := environment.NewConfiguration(settings, s.GetEnvironmentVariables())
-	meta := docker.Metadata{
-		Image: s.Config().Container.Image,
+	meta := winenv.Metadata{
+		// Falls back to the egg's container image as a runtime selector when no
+		// Windows profile is published for it.
+		Runtime: s.Config().Container.Image,
+		Stop:    s.ProcessConfiguration().Stop,
 	}
 
-	if env, err := docker.New(s.ID(), &meta, envCfg); err != nil {
+	if err := m.applyWindowsProfile(s, &meta); err != nil {
+		return nil, err
+	}
+
+	if env, err := winenv.New(s.ID(), &meta, envCfg); err != nil {
 		return nil, err
 	} else {
 		s.Environment = env
@@ -277,6 +281,53 @@ func (m *Manager) init(ctx context.Context) error {
 
 	diff := time.Now().Sub(start)
 	log.WithField("duration", fmt.Sprintf("%s", diff)).Info("finished processing server configurations")
+
+	return nil
+}
+
+// applyWindowsProfile fetches the egg's Windows profile from the Panel plugin
+// and folds it into the environment metadata.
+//
+// When runtime.require_windows_profile is off, a missing profile is a debug-level
+// note and the server falls back to the egg's standard Linux fields. That is only
+// useful for bringing a node up against an unmodified Panel: those fields will
+// not actually work for most eggs, which is why production should turn the
+// setting on and fail closed instead.
+func (m *Manager) applyWindowsProfile(s *Server, meta *winenv.Metadata) error {
+	required := config.Get().Runtime.RequireWindowsProfile
+
+	profile, err := m.client.GetWindowsProfile(s.Context(), s.ID())
+	if err != nil {
+		if errors.Is(err, remote.ErrNoWindowsProfile) || errors.Is(err, remote.ErrNoWindowsProfileAPI) {
+			if required {
+				return errors.WrapIff(err,
+					"manager: server %s cannot run: its egg has no Windows profile", s.ID())
+			}
+			s.Log().WithField("error", err).
+				Debug("no windows profile published for this egg, falling back to the egg's standard fields")
+			return nil
+		}
+		// A transport failure must not stop the node from booting; the server can
+		// be retried when it is next started.
+		s.Log().WithField("error", err).Warn("failed to fetch the windows profile for this server")
+		return nil
+	}
+
+	if profile.Runtime != "" {
+		meta.Runtime = profile.Runtime
+	}
+	if profile.Stop != nil {
+		meta.Stop = *profile.Stop
+	}
+	meta.PseudoConsole = profile.PseudoConsole
+
+	// A Windows-specific startup command replaces the Panel's, which is almost
+	// always Linux-shaped.
+	if profile.Startup != "" {
+		s.Lock()
+		s.cfg.Invocation = profile.Startup
+		s.Unlock()
+	}
 
 	return nil
 }

@@ -1,21 +1,14 @@
 package environment
 
-import (
-	"fmt"
-	"strconv"
 
-	"github.com/docker/go-connections/nat"
-
-	"github.com/pterodactyl/wings/config"
-)
-
-// Defines the allocations available for a given server. When using the Docker environment
-// driver these correspond to mappings for the container that allow external connections.
+// Allocations defines the addresses and ports assigned to a given server.
 type Allocations struct {
-	// ForceOutgoingIP causes a dedicated bridge network to be created for the
-	// server with a special option, causing Docker to SNAT outgoing traffic to
-	// the DefaultMapping's IP. This is important to servers which rely on external
-	// services that check the IP of the server (Source Engine servers, for example).
+	// ForceOutgoingIP is accepted from the Panel and ignored.
+	//
+	// Under Docker this created a dedicated bridge network that SNAT'd outgoing
+	// traffic to the server's own IP, which matters to games that check their
+	// public address. There is no equivalent without per-server network
+	// namespaces, which Windows does not provide outside of containers.
 	ForceOutgoingIP bool `json:"force_outgoing_ip"`
 	// Defines the default allocation that should be used for this server. This is
 	// what will be used for {SERVER_IP} and {SERVER_PORT} when modifying configuration
@@ -30,80 +23,30 @@ type Allocations struct {
 	Mappings map[string][]int `json:"mappings"`
 }
 
-// Converts the server allocation mappings into a format that can be understood by Docker. While
-// we do strive to support multiple environments, using Docker's standardized format for the
-// bindings certainly makes life a little easier for managing things.
+// Bindings returns every port assigned to this server, keyed by the IP it is
+// assigned on.
 //
-// You'll want to use DockerBindings() if you need to re-map 127.0.0.1 to the Docker interface.
-func (a *Allocations) Bindings() nat.PortMap {
-	out := nat.PortMap{}
-
+// Unlike the Docker environment, nothing here publishes or reserves these ports.
+// Windows binds nothing on a server's behalf: the assigned address and port are
+// passed to the process through {SERVER_IP} and {SERVER_PORT} and it is up to
+// the server to honour them.
+//
+// That is a real reduction in what the daemon can guarantee. A misconfigured or
+// malicious server can bind any free port on the host. Constraining that needs
+// per-account Windows Firewall rules, applied outside this process.
+func (a *Allocations) Bindings() map[string][]int {
+	out := make(map[string][]int, len(a.Mappings))
 	for ip, ports := range a.Mappings {
+		valid := make([]int, 0, len(ports))
 		for _, port := range ports {
-			// Skip over invalid ports.
 			if port < 1 || port > 65535 {
 				continue
 			}
-
-			binding := nat.PortBinding{
-				HostIP:   ip,
-				HostPort: strconv.Itoa(port),
-			}
-
-			tcp := nat.Port(fmt.Sprintf("%d/tcp", port))
-			udp := nat.Port(fmt.Sprintf("%d/udp", port))
-
-			out[tcp] = append(out[tcp], binding)
-			out[udp] = append(out[udp], binding)
+			valid = append(valid, port)
+		}
+		if len(valid) > 0 {
+			out[ip] = valid
 		}
 	}
-
-	return out
-}
-
-// Returns the bindings for the server in a way that is supported correctly by Docker. This replaces
-// any reference to 127.0.0.1 with the IP of the pterodactyl0 network interface which will allow the
-// server to operate on a local address while still being accessible by other containers.
-func (a *Allocations) DockerBindings() nat.PortMap {
-	iface := config.Get().Docker.Network.Interface
-
-	out := a.Bindings()
-	// Loop over all the bindings for this container, and convert any that reference 127.0.0.1
-	// to use the pterodactyl0 network interface IP, as that is the true local for what people are
-	// trying to do when creating servers.
-	for p, binds := range out {
-		for i, alloc := range binds {
-			if alloc.HostIP != "127.0.0.1" {
-				continue
-			}
-
-			// If using ISPN just delete the local allocation from the server.
-			if config.Get().Docker.Network.ISPN {
-				out[p] = append(out[p][:i], out[p][i+1:]...)
-			} else {
-				out[p][i] = nat.PortBinding{
-					HostIP:   iface,
-					HostPort: alloc.HostPort,
-				}
-			}
-		}
-	}
-
-	return out
-}
-
-// Converts the server allocation mappings into a PortSet that can be understood
-// by Docker. This formatting is slightly different than "Bindings" as it should
-// return an empty struct rather than a binding.
-//
-// To accomplish this, we'll just get the values from "DockerBindings" and then set them
-// to empty structs. Because why not.
-func (a *Allocations) Exposed() nat.PortSet {
-	out := nat.PortSet{}
-
-	for port := range a.DockerBindings() {
-		out[port] = struct{}{}
-	}
-
 	return out
 }

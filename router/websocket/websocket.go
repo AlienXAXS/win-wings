@@ -21,7 +21,6 @@ import (
 
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/environment/docker"
 	"github.com/pterodactyl/wings/router/tokens"
 	"github.com/pterodactyl/wings/server"
 )
@@ -433,17 +432,11 @@ func (h *Handler) HandleInbound(ctx context.Context, m Message) error {
 				return nil
 			}
 
-			// TODO(dane): should probably add a new process state that is "booting environment" or something
-			//  so that we can better handle this and only set the environment to booted once we're attached.
-			//
-			//  Or maybe just an IsBooted function?
-			if h.server.Environment.State() == environment.ProcessStartingState {
-				if e, ok := h.server.Environment.(*docker.Environment); ok {
-					if !e.IsAttached() {
-						return nil
-					}
-				}
-			}
+			// Upstream additionally checked that the Docker environment had finished
+			// attaching before relaying a command, because the container's stdin was
+			// only usable once the stream was hijacked. The worker owns the process's
+			// stdin from the moment it is created, so a command sent during startup is
+			// simply written to a pipe the process is already holding.
 
 			if err := h.server.Environment.SendCommand(strings.Join(m.Args, "")); err != nil {
 				return err

@@ -7,7 +7,7 @@ import (
 	"emperror.dev/errors"
 	"github.com/apex/log"
 
-	"github.com/pterodactyl/wings/internal/ufs"
+	"github.com/pterodactyl/wings/internal/winfs"
 )
 
 type ErrorCode string
@@ -95,7 +95,7 @@ func (fs *Filesystem) error(err error) *log.Entry {
 // If there is a path resolution error just skip the item entirely. Only return this for a
 // directory, otherwise return nil. Returning this error for a file will stop the walking
 // for the remainder of the directory. This is assuming an FileInfo struct was even returned.
-func (fs *Filesystem) handleWalkerError(err error, f ufs.FileInfo) error {
+func (fs *Filesystem) handleWalkerError(err error, f winfs.FileInfo) error {
 	if !IsErrorCode(err, ErrCodePathResolution) {
 		return err
 	}

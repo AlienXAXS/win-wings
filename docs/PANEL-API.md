@@ -1,0 +1,161 @@
+# Panel API contract for the win-wings Blueprint plugin
+
+This is the API the daemon expects a Blueprint plugin to serve. It was derived
+from the finished daemon implementation rather than designed up front, so every
+field here exists because something in the daemon consumes it.
+
+The Panel itself is **not** forked. Everything below is served by the plugin.
+
+## Why this exists
+
+An egg carries a Linux install script, a Linux startup command, a Docker image,
+and a stop configuration that may be a POSIX signal. On Windows:
+
+- The install script must be PowerShell.
+- The container image means nothing; what matters is what runtime is on the host.
+- The startup command usually needs rewriting — different binary names,
+  backslash paths, and no shell, so `&&`, `|` and `>` are not interpreted.
+- A signal-based stop cannot work. Windows has no signals.
+
+None of that fits in the existing egg schema, and the daemon cannot guess it.
+
+## Transport and authentication
+
+The daemon builds its base URL as `<panel>/api/remote` and authenticates with the
+node's existing credentials:
+
+```
+Authorization: Bearer <token_id>.<token>
+```
+
+**Register these routes on the Panel's existing node-authentication middleware
+group.** Do not invent a separate token: that would add a second credential to
+provision and rotate per node, and a new unauthenticated surface if it were ever
+misconfigured. The node token the daemon already holds is the right one.
+
+## Endpoints
+
+### `GET /api/remote/windows/ping`
+
+Liveness check for the plugin itself. Called once at daemon boot when
+`runtime.require_windows_profile` is enabled.
+
+Any `2xx` response is success; the body is ignored. A `404` makes the daemon
+refuse to start, with a message telling the operator to install the plugin.
+
+This is the fail-closed check: without it a node would come up looking healthy
+and then fail on every individual server.
+
+### `GET /api/remote/windows/servers/{uuid}/profile`
+
+Returns the Windows profile for the egg the given server uses.
+
+**200 response:**
+
+```json
+{
+  "runtime": "jdk-21",
+  "startup": "java -Xms128M -Xmx{{SERVER_MEMORY}}M -jar server.jar nogui",
+  "stop": {
+    "type": "command",
+    "value": "stop"
+  },
+  "pseudo_console": false
+}
+```
+
+**404 response** means no profile is configured for this egg. What the daemon
+does then depends on `runtime.require_windows_profile`:
+
+- `true` (production) — the server is not initialised at all, with an error
+  naming the egg. Better than a server that appears to install and then fails
+  obscurely.
+- `false` (bring-up) — the daemon falls back to the egg's standard fields and
+  logs a debug note. Useful only for testing a node against an unmodified Panel.
+
+A transport error is never fatal: the daemon logs a warning and continues, so a
+plugin outage cannot stop a node from booting servers it already knows about.
+
+#### Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `runtime` | string | What must be present on the host — `jdk-21`, `dotnet-8`, or `""` for a self-contained binary. Replaces the container image. Passed to install scripts as `INSTALL_RUNTIME`. Empty falls back to the egg's `container_image`. |
+| `startup` | string | Windows startup command. Empty uses the Panel's standard startup value. Supports `{{VAR}}` and `${VAR}`. |
+| `stop.type` | string | `command` or `signal`. |
+| `stop.value` | string | For `command`, the text written to stdin (`stop`, `end`, `quit`). |
+| `pseudo_console` | bool | Allocate a ConPTY rather than pipes. Only for processes that detect a non-console stdout — steamcmd being the usual case. |
+
+Omitting `stop` entirely uses the egg's standard stop configuration.
+
+### `GET /api/remote/windows/servers/{uuid}/install`
+
+Optional. If you do not implement it, the daemon uses the standard
+`/servers/{uuid}/install` endpoint and the plugin must instead ensure the
+script served there is PowerShell for Windows nodes.
+
+Same response shape as the standard endpoint:
+
+```json
+{
+  "container_image": "jdk-21",
+  "entrypoint": "powershell",
+  "script": "# PowerShell...\n"
+}
+```
+
+`entrypoint` is ignored — the daemon always runs PowerShell. `container_image`
+is surfaced to the script as `INSTALL_RUNTIME`.
+
+## How install scripts differ
+
+The daemon writes the script to a private temp directory and runs it as:
+
+```
+pwsh.exe -NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass -File install.ps1
+```
+
+PowerShell 7 is used when present, falling back to Windows PowerShell 5.1.
+
+The script runs **inside a Job Object** with the installer resource limits
+applied, and **as the server's own account** when account isolation is
+configured. It is not a container, and it is not privileged.
+
+Environment differences from a Linux egg:
+
+| Linux | Windows |
+|---|---|
+| `/mnt/server` bind mount | `$env:SERVER_DIR`, which is also the working directory |
+| `apt-get`, `curl`, `wget`, `tar` | none of these exist; use `Invoke-WebRequest`, `Expand-Archive` |
+| runs as root in a container | runs as the server's unprivileged account |
+| container image provides the runtime | `$env:INSTALL_RUNTIME` names what is expected; the script must verify it |
+
+Every standard egg variable is present, plus `SERVER_DIR` and `INSTALL_RUNTIME`.
+A non-zero exit fails the installation and the output is written to
+`<log_directory>\install\<uuid>.log` as well as streamed to the Panel.
+
+## Suggested plugin behaviour
+
+**Gate server creation.** The daemon refuses an egg with no profile, but by then
+the Panel has already created the record and the user sees a server stuck in
+"installing". Blocking the egg at selection time on a Windows node turns that
+into a comprehensible "this egg is not available on Windows nodes". This is the
+highest-value UI injection.
+
+**Mark nodes as Windows.** The plugin needs to know which nodes are Windows to
+apply the gate. A node-level flag is the simplest approach.
+
+**Hide meaningless fields.** Swap, OOM-killer toggle, CPU pinning and the Docker
+image selector map to nothing here. Cosmetic, and can come later.
+
+## Things the daemon does not ask for
+
+Deliberately, so the plugin stays small:
+
+- **Runtime installation.** The daemon does not download or manage JREs. The
+  install script owns that.
+- **Port allocation enforcement.** Nothing binds ports on a server's behalf on
+  Windows; allocations are passed through as `{{SERVER_IP}}`/`{{SERVER_PORT}}`
+  and the server is trusted to honour them.
+- **Account management.** Windows accounts are host configuration, created at
+  install time. See [DEPLOYMENT.md](DEPLOYMENT.md).

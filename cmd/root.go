@@ -19,7 +19,6 @@ import (
 	"github.com/NYTimes/logrotate"
 	"github.com/apex/log"
 	"github.com/apex/log/handlers/multi"
-	"github.com/docker/docker/client"
 	"github.com/gammazero/workerpool"
 	"github.com/mitchellh/colorstring"
 	"github.com/spf13/cobra"
@@ -56,7 +55,24 @@ var rootCommand = &cobra.Command{
 			}
 		}
 	},
-	Run: rootCmdRun,
+	Run: rootCmdEntry,
+}
+
+// rootCmdEntry decides whether to run in the foreground or under the service
+// control manager.
+//
+// The same executable serves both. When the SCM starts it, control must be
+// handed to the dispatcher within a few seconds or Windows reports the service
+// as failed, so this check happens before anything slow.
+func rootCmdEntry(cmd *cobra.Command, args []string) {
+	if !runningAsService() {
+		rootCmdRun(cmd, args)
+		return
+	}
+
+	if err := RunAsService(func() { rootCmdRun(cmd, args) }, nil); err != nil {
+		log.WithField("error", err).Fatal("failed to run as a Windows service")
+	}
 }
 
 var versionCommand = &cobra.Command{
@@ -111,21 +127,8 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 		log.WithField("error", err).Fatal("failed to configure system directories for pterodactyl")
 		return
 	}
-	if err := config.EnsurePterodactylUser(); err != nil {
-		log.WithField("error", err).Fatal("failed to create pterodactyl system user")
-		return
-	}
-	if err := config.ConfigurePasswd(); err != nil {
-		log.WithField("error", err).Fatal("failed to configure container passwd file")
-		return
-	}
-	log.WithFields(log.Fields{
-		"username": config.Get().System.Username,
-		"uid":      config.Get().System.User.Uid,
-		"gid":      config.Get().System.User.Gid,
-	}).Info("configured system user successfully")
-	if err := config.EnableLogRotation(); err != nil {
-		log.WithField("error", err).Fatal("failed to configure log rotation on the system")
+	if err := config.ValidateWindowsHost(); err != nil {
+		log.WithField("error", err).Fatal("host is not correctly configured to run servers")
 		return
 	}
 
@@ -138,6 +141,23 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 		}),
 	)
 
+	// Fail closed at boot rather than server by server. Without the Panel plugin
+	// no egg has a Windows profile, so nothing on this node could run correctly.
+	if config.Get().Runtime.RequireWindowsProfile {
+		if err := pclient.CheckWindowsProfileSupport(cmd.Context()); err != nil {
+			log.WithField("error", err).Fatal(
+				"runtime.require_windows_profile is enabled but the panel is not serving " +
+					"the windows profile API; install the win-wings Blueprint plugin, or " +
+					"disable the setting to fall back to the egg's standard fields")
+			return
+		}
+		log.Info("panel is serving the windows profile API")
+	} else {
+		log.Warn("runtime.require_windows_profile is disabled: servers whose egg has no " +
+			"windows profile will fall back to the egg's Linux fields, which will not work " +
+			"for most eggs. Enable it once the panel plugin is deployed")
+	}
+
 	if err := database.Initialize(); err != nil {
 		log.WithField("error", err).Fatal("failed to initialize database")
 		return
@@ -149,16 +169,28 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 		return
 	}
 
-	if err := environment.ConfigureDocker(cmd.Context()); err != nil {
-		log.WithField("error", err).Fatal("failed to configure docker environment")
-		return
+	// Let the system information endpoint report real server counts. The Panel
+	// renders these on the node page where Docker's container counts used to be.
+	system.InstanceCounter = func() (int, int) {
+		all := manager.All()
+		running := 0
+		for _, s := range all {
+			if s.Environment != nil && s.Environment.State() == environment.ProcessRunningState {
+				running++
+			}
+		}
+		return len(all), running
 	}
 
+	log.WithField("runtime", config.DescribeHost()).Info("configured windows runtime")
+
 	if err := config.WriteToDisk(config.Get()); err != nil {
-		if !errors.Is(err, syscall.EROFS) {
-			log.WithField("error", err).Error("failed to write configuration to disk")
-		} else {
+		// A read-only or permission-denied configuration path is a deployment
+		// choice rather than a fault, so it is not surfaced as an error.
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
 			log.WithField("error", err).Debug("failed to write configuration to disk")
+		} else {
+			log.WithField("error", err).Error("failed to write configuration to disk")
 		}
 	}
 
@@ -221,11 +253,10 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 			defer cancel()
 
 			r, err := s.Environment.IsRunning(ctx)
-			// We ignore missing containers because we don't want to actually block booting of wings at this
-			// point. If we didn't do this, and you pruned all the images and then started wings you could
-			// end up waiting a long period of time for all the images to be re-pulled on Wings boot rather
-			// than when the server itself is started.
-			if err != nil && !client.IsErrNotFound(err) {
+			// A server with no worker running is simply offline, which IsRunning
+			// already reports without an error, so anything surfacing here is a
+			// genuine fault worth logging. It must not block boot either way.
+			if err != nil {
 				s.Log().WithField("error", err).Error("error checking server environment status")
 			}
 
