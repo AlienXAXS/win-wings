@@ -209,23 +209,12 @@ Set-Location $SteamCmdDir
 ## Environment diagnostics - these end up in the install log and are the first
 ## thing to read when an install fails.
 ##
-## Inodes have no NTFS equivalent and are dropped. Free space and MTU carry over.
+## The Linux egg also reported inodes, free space and MTU. Inodes have no NTFS
+## equivalent. The other two are gone because they did not earn their place: the
+## free space figure was wrong, and Get-NetIPInterface can sit for minutes on a
+## host with virtual adapters before returning nothing useful - which on a slow
+## install is time spent staring at a console that appears to have hung.
 ## ---------------------------------------------------------------------------
-
-Write-Host '----- disk (space) -----'
-try {
-    $qualifier = (Split-Path -Qualifier $SteamRoot).TrimEnd(':')
-    Get-PSDrive -Name $qualifier | Select-Object Name,
-        @{n = 'Used(GB)'; e = { [math]::Round($_.Used / 1GB, 1) }},
-        @{n = 'Free(GB)'; e = { [math]::Round($_.Free / 1GB, 1) }} | Format-Table | Out-String | Write-Host
-} catch { Write-Host "  unavailable: $($_.Exception.Message)" }
-
-Write-Host '----- network MTU -----'
-try {
-    Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop |
-        Where-Object { $_.ConnectionState -eq 'Connected' } |
-        Select-Object InterfaceAlias, NlMtu | Format-Table | Out-String | Write-Host
-} catch { Write-Host '  unavailable' }
 
 Write-Host '----- environment -----'
 Write-Host "  SERVER_DIR      = $SteamRoot"
