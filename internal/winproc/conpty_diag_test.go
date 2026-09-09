@@ -38,35 +38,39 @@ import (
 // Server 2025 host, both from an interactive RDP session and as SYSTEM in
 // session 0 via a scheduled task. Whatever this is, it is not the session.
 //
-// Since then, two further symptoms have been separated:
+// A one-process-per-trial harness -- a standalone binary run once per trial,
+// so a leaked pseudo console cannot contaminate the next result -- then showed
+// the failure
+// is entirely deterministic: 40/40 with STATUS_DLL_INIT_FAILED, and NOT ONE
+// CreateProcess parameter changes it -- not bInheritHandles, CREATE_SUSPENDED,
+// lpApplicationName, the environment block, os.NewFile on the pipe ends, when
+// the reader starts, PSEUDOCONSOLE_INHERIT_CURSOR, or lpDesktop. A control in
+// the same harness that swaps the pseudo console for plain pipes works every
+// time, so the harness is sound and the pseudo console specifically is not.
 //
-//   - The child now dies with STATUS_DLL_INIT_FAILED (0xC0000142) before running
-//     any of its own code, as well as producing no output.
-//   - An exact inline replica of the EchoCon sequence exits 0 where Start fails,
-//     with byte-identical CreateProcess arguments (flags 0x80400, bInheritHandles
-//     FALSE, cb 112, no lpDesktop). The difference is inside setupPseudoConsole.
+// An earlier note here blamed os.NewFile. That was WRONG: it came from a harness
+// that ran trials in one process, where leaked pseudo consoles from previous
+// trials contaminated later ones. Do not chase it.
 //
-// The one difference setupPseudoConsole has from the replica is that it wraps our
-// ends of the pipes in os.NewFile before CreateProcess. An A/B in a single
-// process -- identical but for those two calls -- turned exit 0 into 0xC0000142.
-// That is a real signal and os.NewFile associating a pipe handle with the Go
-// runtime's completion port is a plausible mechanism, but it does NOT fully
-// explain the failure: a later run of the raw, unwrapped configuration failed the
-// same way. There is a nondeterministic component still unaccounted for.
+// Also ruled out: console handoff to Windows Terminal (no DelegationConsole or
+// DelegationTerminal values are set), and conhost being absent (one is spawned;
+// it simply never services the console -- with no child at all, nothing is ever
+// emitted on the output side).
 //
-// Also ruled out since: CREATE_SUSPENDED (Start fails without it too).
+// STILL UNSOLVED. But it no longer blocks anything, because the reason ConPTY
+// was wanted for stopping servers turned out to have a better answer that needs
+// no pseudo console at all -- see winproc.EnsureConsole and Process.CtrlC.
+// ConPTY is now only needed for processes that detect a non-console stdout and
+// change behaviour, steamcmd being the usual case.
 //
-// Traps for whoever picks this up -- both cost several runs:
+// Traps that cost the most time here, both in the diagnostics rather than the
+// code under test:
 //
-//   - ClosePseudoConsole blocks until the output pipe is drained, so a diagnostic
-//     that closes it without a reader deadlocks.
+//   - ClosePseudoConsole blocks until the output pipe is drained, so a
+//     diagnostic that closes it without a reader deadlocks.
 //   - CloseHandle on the output pipe blocks while a synchronous ReadFile is
 //     pending on it. Tear the child down first.
-//
-// The worker defaults to pipe mode, which is fully working. ConPTY is needed for
-// processes that detect a non-console stdout and change behaviour (steamcmd being
-// the usual case), and now also for the ctrl+c stop mode, which cannot be
-// delivered without a console. Both are unavailable until this is solved.
+//   - Trials must not share a process. Anything less and the results lie.
 //
 // Run these on a clean Windows VM with:
 //

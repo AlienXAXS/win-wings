@@ -187,10 +187,12 @@ func Start(cfg Config, job *jobobject.Job) (_ *Process, err error) {
 		if err = proc.setupPipes(&si); err != nil {
 			return nil, err
 		}
-		// A distinct process group is what makes GenerateConsoleCtrlEvent able to
-		// target this process specifically. Not available alongside a pseudo
-		// console, which is why CtrlBreak reports as unsupported in that mode.
-		flags |= windows.CREATE_NEW_PROCESS_GROUP
+		// Deliberately NOT CREATE_NEW_PROCESS_GROUP. It would let CTRL_BREAK be
+		// aimed at this process specifically, but its documentation is explicit
+		// that Ctrl+C is disabled for every process in the new group -- and a
+		// real interrupt is worth more than a targeted break. Addressing the
+		// whole console is the right thing anyway: see console.go.
+		//
 	}
 
 	cmdline := windows.ComposeCommandLine(cfg.Argv)
@@ -422,17 +424,19 @@ func (p *Process) closeConsole() {
 
 // CtrlBreak sends CTRL_BREAK_EVENT to the process group.
 //
-// This is the nearest thing Windows has to SIGTERM and it is not a close match.
-// CTRL_C_EVENT cannot be directed at a specific process group at all, so only
-// break is available; it reaches everything sharing the console; and many game
-// servers install no handler for it and die uncleanly, which is no better than a
-// kill. Treat it as a fallback between a stdin stop command and terminating the
-// job, never as the primary path.
+// This is the nearest thing Windows has to SIGTERM and it is not a close match:
+// many servers install no handler for it and die uncleanly, which is no better
+// than a kill. Prefer CtrlC, which more servers actually handle.
+//
+// Addressed to the whole console rather than to this process's group, because
+// the server is deliberately not given a group of its own -- that flag disables
+// Ctrl+C. The worker's console holds only the worker and this server, and the
+// worker ignores the event.
 func (p *Process) CtrlBreak() error {
 	if p.console() != 0 {
 		return fmt.Errorf("winproc: ctrl-break unavailable in pseudo console mode")
 	}
-	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(p.Pid)); err != nil {
+	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, 0); err != nil {
 		return fmt.Errorf("winproc: ctrl-break: %w", err)
 	}
 	return nil
@@ -446,16 +450,32 @@ func (p *Process) CtrlBreak() error {
 // is no help here -- it cannot target CTRL_C_EVENT at a process group -- so the
 // pseudo console's input side is the only route to a single server.
 //
-// The corollary is that a server given plain pipes cannot be sent one at all:
-// there is no console, so there is nothing to translate the byte.
+// A server given plain pipes shares the worker's console instead, and the event
+// is raised on that console directly. Either way an interrupt is deliverable;
+// what is required is that a console exists at all, which is what
+// EnsureConsole guarantees.
 func (p *Process) CtrlC() error {
-	if p.console() == 0 {
-		return fmt.Errorf("winproc: ctrl-c needs a pseudo console; this process was given plain pipes")
+	// With a pseudo console the interrupt goes in the way a keyboard sends it:
+	// the byte 0x03 written to the console input, which the console driver
+	// turns into a CTRL_C_EVENT.
+	if p.console() != 0 {
+		if p.stdin == nil {
+			return fmt.Errorf("winproc: ctrl-c: the process has no console input")
+		}
+		if _, err := p.stdin.Write([]byte{0x03}); err != nil {
+			return fmt.Errorf("winproc: ctrl-c: %w", err)
+		}
+		return nil
 	}
-	if p.stdin == nil {
-		return fmt.Errorf("winproc: ctrl-c: the process has no console input")
+
+	// Otherwise the server is sharing the worker's own console, and the event
+	// can simply be raised on it. Group 0 means every process attached to this
+	// console -- the worker included, which is why it holds the ignore
+	// attribute. See console.go for the conditions this depends on.
+	if !hasConsole() {
+		return fmt.Errorf("winproc: ctrl-c: the worker has no console to raise an interrupt on")
 	}
-	if _, err := p.stdin.Write([]byte{0x03}); err != nil {
+	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_C_EVENT, 0); err != nil {
 		return fmt.Errorf("winproc: ctrl-c: %w", err)
 	}
 	return nil

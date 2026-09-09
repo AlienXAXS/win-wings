@@ -447,18 +447,18 @@ func TestStopEscalationIsLogged(t *testing.T) {
 		"timeout=2s",
 		"writing the stop command to the process's stdin",
 		"the process is still running; escalating",
-		"sending ctrl+break to the process group",
+		"sending ctrl+c to the server's console",
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("stop diagnostics never mentioned %q", want)
 		}
 	}
 
-	// Whether ctrl+break reaches a detached process depends on the console it
-	// was given, so either outcome is legitimate here. What matters is that the
-	// log says which one happened rather than leaving it to be inferred.
+	// The escalation may end at ctrl+c, at ctrl+break, or at the kill, depending
+	// on what this particular child honours. What matters is that the log says
+	// which, rather than leaving it to be inferred from the process being gone.
 	if !strings.Contains(logs, "killing the job object") &&
-		!strings.Contains(logs, "the process exited after=ctrl+break") &&
+		!strings.Contains(logs, "after=ctrl+c") &&
 		!strings.Contains(logs, "after=ctrl+break") {
 		t.Error("stop diagnostics never reported how the process finally went away")
 	}

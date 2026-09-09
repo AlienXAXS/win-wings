@@ -129,16 +129,14 @@ const (
 	// This is what most eggs use and the only mechanism that works reliably.
 	StopCommand StopMode = "command"
 
-	// StopCtrlC delivers a Ctrl+C the way a keyboard does: the byte 0x03 is
-	// written to the process's console input and the console driver turns it into
-	// a CTRL_C_EVENT. Windows has no signal to send, and GenerateConsoleCtrlEvent
-	// cannot target CTRL_C_EVENT at a process group, so this is the only way to
-	// deliver one to a single server.
+	// StopCtrlC raises a real CTRL_C_EVENT on the server's console. Windows has
+	// no signal to send, and this is the closest thing that exists: it is exactly
+	// what pressing Ctrl+C in a terminal does, and most console servers shut down
+	// cleanly on it.
 	//
-	// It requires the server to have been given a pseudo console: without one
-	// there is no console input to write to and no driver to translate the byte.
-	// An egg that stops this way must enable the pseudo console in its Windows
-	// profile.
+	// It needs no pseudo console. The server shares the worker's console, and the
+	// event is raised there; the worker survives it by handling it. See
+	// winproc/console.go for the conditions that makes this work.
 	StopCtrlC StopMode = "ctrl_c"
 
 	// StopCtrlBreak sends CTRL_BREAK_EVENT to the process group.

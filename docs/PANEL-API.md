@@ -85,7 +85,7 @@ plugin outage cannot stop a node from booting servers it already knows about.
 | `runtime` | string | Which runtime this egg needs — see below. Empty falls back to the egg's `container_image`. |
 | `startup` | string | Windows startup command. Empty uses the Panel's standard startup value. Supports `{{VAR}}` and `${VAR}`. |
 | `stop.type` | string | `command` or `signal`. |
-| `stop.value` | string | For `command`, the text written to stdin (`stop`, `end`, `quit`). For `signal`, one of `ctrl_c`, `ctrl+c`, `ctrlc`, `^c` or `sigint` to request an interrupt; anything else falls back to CTRL_BREAK. |
+| `stop.value` | string | For `command`, the text written to stdin (`stop`, `end`, `quit`). For `signal`, leave empty to get a Ctrl+C interrupt, or name a break (`ctrl_break`, `break`, `sigquit`) to get CTRL_BREAK instead. |
 | `pseudo_console` | bool | Allocate a ConPTY rather than pipes. Only for processes that detect a non-console stdout — steamcmd being the usual case. |
 
 Omitting `stop` entirely uses the egg's standard stop configuration.
@@ -96,18 +96,18 @@ Three mechanisms exist, and they are not equivalent.
 
 | `stop.type` | `stop.value` | What the daemon does |
 |---|---|---|
-| `command` | the text | Writes it to stdin. Works for any server with a console command, needs no pseudo console, and is the right answer wherever it is available. |
-| `signal` | `ctrl_c` (and spellings) | Writes `0x03` to the server's console input, which the console driver turns into a real `CTRL_C_EVENT`. **Requires `pseudo_console: true`** — without a console there is nothing to translate the byte, and the stop degrades to a kill. |
-| `signal` | anything else | Attempts `CTRL_BREAK_EVENT`. Not deliverable to a pipe-backed process, so in practice this is a kill. |
+| `command` | the text | Writes it to stdin. The right answer wherever the server has a console command. |
+| `signal` | empty | Raises a real `CTRL_C_EVENT` on the server's console — what pressing Ctrl+C in a terminal does. Most console servers shut down cleanly on it. Needs no pseudo console. |
+| `signal` | `ctrl_break`, `break`, `sigquit` | Raises `CTRL_BREAK_EVENT` instead. Weaker: fewer programs handle it, and those that do often treat it as "dump state and continue". Only ask for this if Ctrl+C is known not to work. |
 | omitted, or unrecognised | — | The server is killed. |
 
 Every attempt escalates on a timeout: the chosen mechanism, then CTRL_BREAK,
 then terminating the Job Object. Each step and its outcome is logged, including
 how long the server was given.
 
-A POSIX signal name such as `SIGTERM` inherited from an unmodified egg is not a
-stop configuration on Windows. `SIGINT` is the one exception, and only because it
-is read as a request for `ctrl_c`.
+An unmodified egg carrying a POSIX signal name needs no special handling: any
+`signal` stop becomes a Ctrl+C, which is the closest thing Windows has and is
+what such an egg meant. Only reach for the break spellings to override that.
 
 #### Runtime names
 

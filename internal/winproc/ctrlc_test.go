@@ -4,6 +4,7 @@ package winproc
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -107,33 +108,77 @@ func TestCtrlCStopsAProcessInAPseudoConsole(t *testing.T) {
 	}
 }
 
-// TestCtrlCIsRefusedWithoutAPseudoConsole documents the constraint the Panel
-// plugin has to surface: a server given plain pipes has no console, so there is
-// nothing to turn the byte into an interrupt.
-func TestCtrlCIsRefusedWithoutAPseudoConsole(t *testing.T) {
-	exe := os.Getenv("COMSPEC")
-	if exe == "" {
-		exe = `C:\Windows\System32\cmd.exe`
+// TestCtrlCInterruptsAProcessSharingTheWorkersConsole is the mechanism the stop
+// path actually uses. No pseudo console is involved: the child inherits the
+// console this process owns, and the interrupt is raised on that console.
+//
+// The assertion is the exit code. STATUS_CONTROL_C_EXIT is only produced by the
+// console driver tearing down a process that received a real CTRL_C_EVENT, so
+// it cannot be reached by the child merely exiting on its own.
+func TestCtrlCInterruptsAProcessSharingTheWorkersConsole(t *testing.T) {
+	// Take a private console first. Raising an interrupt on an inherited one
+	// would deliver it to the test runner and the shell that started it, which
+	// is not a test failure so much as a small act of vandalism.
+	if !UseOwnConsole() {
+		t.Skip("could not take a private console")
 	}
 
+	// ping ignores stdin and installs no Ctrl+C handler, so the console driver
+	// terminates it and the exit code is unambiguous. Run directly rather than
+	// through cmd.exe, which absorbs the interrupt on its child's behalf.
+	exe := filepath.Join(os.Getenv("SystemRoot"), "System32", "PING.EXE")
 	p, err := Start(Config{
-		Argv: []string{exe, "/c", "ping", "-n", "600", "127.0.0.1"},
+		Argv: []string{exe, "-n", "30", "127.0.0.1"},
 		Dir:  t.TempDir(),
 		Env:  os.Environ(),
 	}, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer func() {
-		_ = p.Kill()
-		_ = p.Close()
+	defer p.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := p.Output().Read(buf); err != nil {
+				return
+			}
+		}
 	}()
 
-	err = p.CtrlC()
-	if err == nil {
-		t.Fatal("expected ctrl+c to be refused without a pseudo console")
+	exited := make(chan uint32, 1)
+	go func() {
+		code, _ := p.Wait()
+		exited <- code
+	}()
+
+	// Let the child attach to the console before interrupting it.
+	time.Sleep(1200 * time.Millisecond)
+
+	if err := p.CtrlC(); err != nil {
+		t.Fatalf("CtrlC: %v", err)
 	}
-	if !strings.Contains(err.Error(), "pseudo console") {
-		t.Errorf("error is %q, want it to name the missing pseudo console", err)
+
+	select {
+	case code := <-exited:
+		if code != 0xC000013A {
+			t.Errorf("exit code is 0x%X, want STATUS_CONTROL_C_EXIT (0xC000013A)", code)
+		}
+	case <-time.After(10 * time.Second):
+		_ = p.Kill()
+		t.Fatal("ctrl+c did not reach the process")
+	}
+}
+
+// TestCtrlCNeedsAConsole covers the failure the worker warns about at startup:
+// with no console at all there is nothing to raise an interrupt on.
+func TestCtrlCNeedsAConsole(t *testing.T) {
+	if hasConsole() {
+		t.Skip("this process has a console; the no-console path cannot be exercised here")
+	}
+	p := &Process{}
+	err := p.CtrlC()
+	if err == nil || !strings.Contains(err.Error(), "no console") {
+		t.Errorf("error is %v, want it to name the missing console", err)
 	}
 }

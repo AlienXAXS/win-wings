@@ -54,6 +54,17 @@ func main() {
 
 	w := worker.New(*cfg)
 
+	// A worker is spawned detached and so has no console. It needs one before it
+	// launches anything: a server inherits the worker's console, and that is the
+	// only route by which an interrupt can ever reach it. Not fatal -- a server
+	// with a stdin stop command does not need this, and refusing to start one
+	// over it would be a worse outcome than a stop that has to escalate.
+	if err := winproc.EnsureConsole(); err != nil {
+		w.Log(wire.LogWarn, "could not allocate a console; servers on this worker cannot be "+
+			"sent ctrl+c or ctrl+break and will have to be killed if they do not stop "+
+			"on a console command", "error", err.Error())
+	}
+
 	// The worker launches the game server under its own account, which is where
 	// a desktop grant can fail. Relayed up the control pipe and written to the
 	// worker's log, because its stderr goes to a file nobody thinks to look in.

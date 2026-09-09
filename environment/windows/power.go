@@ -437,7 +437,7 @@ func (e *Environment) Attach(ctx context.Context) error {
 // Stop asks the server to shut down gracefully.
 func (e *Environment) Stop(ctx context.Context) error {
 	e.mu.RLock()
-	c, stop, pty := e.client, e.meta.Stop, e.meta.PseudoConsole
+	c, stop := e.client, e.meta.Stop
 	e.mu.RUnlock()
 
 	if c == nil {
@@ -455,38 +455,18 @@ func (e *Environment) Stop(ctx context.Context) error {
 		msg.Value = stop.Value
 
 	case remote.ProcessStopSignal, remote.ProcessStopNativeStop:
-		// A POSIX signal name is what an unmodified egg carries here, and it means
-		// nothing on Windows. The egg's Windows profile can ask for ctrl+c instead,
-		// which is a real interrupt and is what most console servers shut down on;
-		// it needs a pseudo console to be delivered through, so a profile choosing
-		// it must enable one.
-		if isCtrlC(stop.Value) {
-			msg.Mode = wire.StopCtrlC
-			if !pty {
-				// Caught here rather than left to fail in the worker, because the
-				// fix is a profile setting and the operator is reading this log to
-				// find out why their server was killed.
-				e.log().Warn("this egg stops with ctrl+c but does not enable the pseudo " +
-					"console; there is no console to deliver it through. Turn on the " +
-					"pseudo console in the egg's windows profile")
-			}
-			break
-		}
-
-		// Neither of these exists here. A POSIX signal has no Windows equivalent,
-		// and a "native stop" means `docker stop`, which is SIGTERM followed by a
-		// kill. CTRL_BREAK is the nearest thing to both; it is widely unhandled by
-		// game servers, so it is attempted and then escalated rather than relied
-		// upon.
+		// Neither exists on Windows. A POSIX signal has no equivalent, and a
+		// "native stop" means `docker stop` -- SIGTERM then a kill. A console
+		// interrupt is the real counterpart to both, and most console servers
+		// shut down cleanly on one, so it is what a signal egg gets by default.
 		//
-		// Neither is a good outcome. An egg that stops this way has no graceful
-		// path on Windows at all, and the operator wants to know that rather than
-		// discover it when a save is lost, so it is a warning and not a note.
-		msg.Mode = wire.StopCtrlBreak
-		e.log().WithField("panel_type", stop.Type).
-			Warn("this egg has no windows stop command; the server can only be asked to " +
-				"stop with ctrl+break, and will be killed if it does not. Set a stop " +
-				"command on the egg's windows profile")
+		// CTRL_BREAK is only used when the profile asks for it by name. It is
+		// the weaker of the two: far fewer programs handle it, and those that do
+		// often treat it as "dump state and carry on" rather than "exit".
+		msg.Mode = wire.StopCtrlC
+		if isCtrlBreak(stop.Value) {
+			msg.Mode = wire.StopCtrlBreak
+		}
 
 	default:
 		msg.Mode = wire.StopTerminate
@@ -512,14 +492,13 @@ func (e *Environment) Stop(ctx context.Context) error {
 	return c.Stop(msg)
 }
 
-// isCtrlC reports whether a stop value is asking for an interrupt.
+// isCtrlBreak reports whether a stop value is asking specifically for a break
+// rather than the interrupt a signal stop otherwise gets.
 //
-// The spellings are the ones an operator plausibly types into the Panel. SIGINT
-// is included because that is what an interrupt is called everywhere else, and
-// an egg that already carries it means exactly this.
-func isCtrlC(value string) bool {
+// The spellings are the ones an operator plausibly types into the Panel.
+func isCtrlBreak(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "ctrl_c", "ctrl+c", "ctrlc", "^c", "sigint":
+	case "ctrl_break", "ctrl+break", "ctrlbreak", "break", "^break", "sigquit":
 		return true
 	}
 	return false
