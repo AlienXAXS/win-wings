@@ -320,10 +320,16 @@ func (e *Environment) applyFirewall() {
 				"will start but may be unreachable")
 		return
 	}
-	if len(bindings) > 0 {
-		e.log().WithField("allocations", len(bindings)).
-			Debug("opened this server's allocated ports in the Windows Firewall")
+	if len(bindings) == 0 {
+		// Not an error -- a server can legitimately have none -- but it is the
+		// explanation for a server that starts, reports healthy, and that nobody
+		// can connect to, so it is worth saying once per start.
+		e.log().Warn("this server has no allocations, so no ports were opened in the " +
+			"Windows Firewall; it will start but nothing outside this host can reach it")
+		return
 	}
+	e.log().WithField("allocations", len(bindings)).
+		Debug("opened this server's allocated ports in the Windows Firewall")
 }
 
 // Destroy stops the server and removes its worker state.
