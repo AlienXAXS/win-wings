@@ -169,9 +169,15 @@ func init() {
 
 // selfTestUUIDs are the two fake servers the suite provisions. The second exists
 // only so the first can be shown to be unable to read it.
+//
+// They must differ within their first 16 hexadecimal characters, because that is
+// all of a UUID that survives truncation into a 20-character account name. Two
+// that differ only at the end map onto one account, and the daemon then refuses
+// to reuse it — correctly, but the suite cannot run. A real v4 UUID is random
+// throughout, so this is a constraint on test data rather than on servers.
 var selfTestUUIDs = [2]string{
-	"00000000-0000-4000-8000-00000000se01",
-	"00000000-0000-4000-8000-00000000se02",
+	"5e1f7e51-0000-4000-8000-000000000001",
+	"5e1f7e52-0000-4000-8000-000000000002",
 }
 
 func runSelfTest(keep bool) error {

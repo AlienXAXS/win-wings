@@ -92,22 +92,34 @@ func (m *Manager) Ensure(uuid string) (string, string, error) {
 			return "", "", err
 		}
 
-	case !existing.ManagedFor(uuid):
-		// Either an account of the operator's that happens to collide, or one
-		// left behind by a server with a different UUID. Neither is ours to
-		// reset the password on.
-		return "", "", fmt.Errorf(
-			"winuser: the account %q already exists but was not created by this daemon for "+
-				"server %s (its description reads %q). Rename or remove that account, or set "+
-				"system.account.prefix to something that does not collide",
-			name, uuid, existing.Comment)
-
-	default:
+	case existing.ManagedFor(uuid):
 		// Ours, from a previous run of the daemon. The password it was given
 		// then is gone, so issue a new one.
 		if err := SetPassword(name, password); err != nil {
 			return "", "", err
 		}
+
+	case existing.Managed():
+		// Ours, but another server's. The two UUIDs agree in the characters that
+		// survive truncation into a 20-character account name, which for real v4
+		// UUIDs takes 64 bits of coincidence. Reusing the account would hand one
+		// server the other's identity, so it is refused.
+		return "", "", fmt.Errorf(
+			"winuser: the account %q belongs to server %s, not %s. Their UUIDs agree in the "+
+				"first %d hexadecimal characters, which is all that fits in a Windows account "+
+				"name alongside the %q prefix. Shorten system.account.prefix to keep more of "+
+				"the UUID, or delete one of the two servers",
+			name, strings.TrimPrefix(existing.Comment, markerPrefix), uuid,
+			maxAccountName-len(m.prefix), m.prefix)
+
+	default:
+		// An account of the operator's that happens to collide. Not ours to
+		// reset the password on.
+		return "", "", fmt.Errorf(
+			"winuser: the account %q already exists but was not created by this daemon "+
+				"(its description reads %q). Rename or remove that account, or set "+
+				"system.account.prefix to something that does not collide",
+			name, existing.Comment)
 	}
 
 	sid, err := SID(name)

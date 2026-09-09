@@ -102,11 +102,41 @@ func TestNameForIsStableAndDistinct(t *testing.T) {
 	if m.NameFor(a) == m.NameFor("2e4b9e5f-6f6a-4a63-9b1e-0c9a7d2b8f41") {
 		t.Error("UUIDs differing in the first character produced the same account name")
 	}
+	// Two UUIDs differing only past the truncation point DO collide. That is
+	// inherent to fitting a UUID into a 20-character account name, and it is
+	// what the marker check in Ensure exists to make safe. Asserted rather than
+	// left implicit, because it is a real property that surprises people —
+	// including whoever writes the next set of hand-made test UUIDs.
 	if m.NameFor(a) != m.NameFor(b) {
-		t.Log("note: these UUIDs did not collide, but the marker check is what guarantees safety")
+		t.Fatalf("expected UUIDs differing only in their last character to produce the "+
+			"same truncated name, got %q and %q; the truncation rule changed and the "+
+			"collision handling in Ensure should be revisited", m.NameFor(a), m.NameFor(b))
 	}
 	if strings.ToLower(m.NameFor(a)) != m.NameFor(strings.ToUpper(a)) {
 		t.Error("NameFor is case-sensitive; the Panel does not guarantee UUID casing")
+	}
+}
+
+// TestEnsureRefusesAnotherServersAccount covers the truncation collision without
+// needing privilege to create anything, by checking the decision rather than the
+// side effect.
+func TestEnsureDistinguishesCollisionKinds(t *testing.T) {
+	const mine = "1e4b9e5f-6f6a-4a63-9b1e-0c9a7d2b8f41"
+	const theirs = "1e4b9e5f-6f6a-4a63-9b1e-0c9a7d2b8f99"
+
+	// Same server: reuse and reissue the password.
+	if !(Info{Comment: markerPrefix + mine}).ManagedFor(mine) {
+		t.Error("an account created for this server was not recognised as reusable")
+	}
+	// Another server whose name truncated onto the same account: managed, but
+	// not ours to take.
+	other := Info{Comment: markerPrefix + theirs}
+	if !other.Managed() {
+		t.Error("another server's account was not recognised as daemon-managed")
+	}
+	if other.ManagedFor(mine) {
+		t.Error("another server's account was claimed for this server, which would hand " +
+			"one server the other's identity")
 	}
 }
 
