@@ -185,6 +185,11 @@ func (e *Environment) ServerRoot() string {
 	return config.Get().System.ServerRoot(e.Id)
 }
 
+// tempDirectory is the server's scratch space, a sibling of its data directory.
+func (e *Environment) tempDirectory() string {
+	return config.Get().System.ServerTemp(e.Id)
+}
+
 // workingDirectory is the server's own files: the sandbox and SFTP root, and
 // what the Panel thinks of as /home/container.
 func (e *Environment) workingDirectory() string {
@@ -211,6 +216,9 @@ func (e *Environment) Create() error {
 
 	if err := os.MkdirAll(e.workingDirectory(), 0o700); err != nil {
 		return errors.Wrap(err, "environment/windows: failed to create server data directory")
+	}
+	if err := os.MkdirAll(e.tempDirectory(), 0o700); err != nil {
+		return errors.Wrap(err, "environment/windows: failed to create server temp directory")
 	}
 
 	wc := worker.Config{
@@ -261,11 +269,17 @@ func (e *Environment) applyPermissions() error {
 		return nil
 	}
 
-	// Daemon-owned first, so the grant below cannot widen it.
+	// Daemon-owned first, so the grants below cannot widen it.
 	if err := winacl.DenyAll(e.ServerRoot()); err != nil {
 		return err
 	}
-	return winacl.GrantExclusiveWrite(e.workingDirectory(), username)
+	if err := winacl.GrantExclusiveWrite(e.workingDirectory(), username); err != nil {
+		return err
+	}
+	// TEMP sits outside the sandbox so that scratch files are not charged
+	// against the user's quota or copied into backups, which means it needs a
+	// grant of its own -- DenyAll above has just taken it away.
+	return winacl.GrantExclusiveWrite(e.tempDirectory(), username)
 }
 
 // Destroy stops the server and removes its worker state.

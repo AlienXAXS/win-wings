@@ -9,6 +9,7 @@ import "path/filepath"
 //	<data>\<uuid>\                 server root, owned by the daemon
 //	<data>\<uuid>\data\            server files — the sandbox and SFTP root
 //	<data>\<uuid>\runtime\         per-server runtime, when one is provisioned
+//	<data>\<uuid>\tmp\             TEMP for this server, outside the disk quota
 //	<data>\<uuid>\worker.json      worker configuration
 //	<data>\<uuid>\console.log      console history
 //
@@ -54,6 +55,17 @@ func (sc *SystemConfiguration) ServerRuntime(uuid string) string {
 // ServerWorkerConfig returns the path of a server's worker configuration.
 func (sc *SystemConfiguration) ServerWorkerConfig(uuid string) string {
 	return filepath.Join(sc.Data, uuid, WorkerConfigFileName)
+}
+
+// ServerTemp returns a server's scratch directory.
+//
+// A sibling of ServerData rather than a child of it. TEMP is where Windows
+// installers unpack, and a game depot staged there can be several gigabytes;
+// inside the sandbox that would be charged against the user's disk quota and
+// copied into every backup, since both walk the sandbox root. The server's own
+// account is granted write access here and nowhere else outside its data.
+func (sc *SystemConfiguration) ServerTemp(uuid string) string {
+	return filepath.Join(sc.Data, uuid, "tmp")
 }
 
 // ServerConsoleLog returns the path of a server's console log.

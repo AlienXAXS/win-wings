@@ -19,6 +19,7 @@ import (
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/internal/accounts"
 	"github.com/pterodactyl/wings/internal/jobobject"
+	"github.com/pterodactyl/wings/internal/winenv"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/remote"
 	"github.com/pterodactyl/wings/system"
@@ -236,6 +237,11 @@ func (ip *InstallationProcess) BeforeExecute() error {
 	if err := os.MkdirAll(ip.Server.Filesystem().Path(), 0o700); err != nil {
 		return errors.WithMessage(err, "failed to create server data directory for install process")
 	}
+	// So must the scratch directory the environment points TEMP at. A script
+	// that unpacks an archive is the first thing to notice its absence.
+	if err := os.MkdirAll(config.Get().System.ServerTemp(ip.Server.ID()), 0o700); err != nil {
+		return errors.WithMessage(err, "failed to create server temp directory for install process")
+	}
 	if err := os.MkdirAll(filepath.Dir(ip.GetLogPath()), 0o700); err != nil {
 		return errors.WithMessage(err, "failed to create install log directory")
 	}
@@ -301,6 +307,14 @@ func (ip *InstallationProcess) installEnvironment() []string {
 	// It is also the script's working directory, so a script can use either.
 	env = append(env, "SERVER_DIR="+ip.Server.Filesystem().Path())
 	env = append(env, "INSTALL_RUNTIME="+ip.Script.ContainerImage)
+
+	// Layer those over a working Windows environment. An install script is the
+	// place this matters most: it downloads, unpacks and runs vendor tooling,
+	// none of which survives a missing SystemRoot or TEMP.
+	env = winenv.Merge(winenv.Base(winenv.Paths{
+		Data: ip.Server.Filesystem().Path(),
+		Temp: config.Get().System.ServerTemp(ip.Server.ID()),
+	}), env)
 
 	// Put the requested runtime ahead of the host PATH, and export RUNTIME_PATH,
 	// so an install script can invoke the right java without hardcoding a path.

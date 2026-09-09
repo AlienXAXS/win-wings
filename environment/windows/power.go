@@ -15,6 +15,7 @@ import (
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/internal/accounts"
+	"github.com/pterodactyl/wings/internal/winenv"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/internal/wire"
 	"github.com/pterodactyl/wings/internal/worker"
@@ -227,7 +228,14 @@ func (e *Environment) Start(ctx context.Context) error {
 	// Put the egg's runtime ahead of the host PATH so that a startup line saying
 	// "java" gets the version this egg asked for rather than whichever JRE was
 	// installed most recently.
-	envVars := config.Get().Runtime.ApplyRuntime(runtimeName, e.Config().EnvironmentVariables())
+	// The Panel's variables layered over a working Windows environment. Without
+	// the base, the process gets no SystemRoot, no TEMP and no PATH, because a
+	// non-NULL environment block replaces the parent's rather than extending it.
+	envVars := winenv.Merge(
+		winenv.Base(winenv.Paths{Data: e.workingDirectory(), Temp: e.tempDirectory()}),
+		e.Config().EnvironmentVariables(),
+	)
+	envVars = config.Get().Runtime.ApplyRuntime(runtimeName, envVars)
 
 	argv, err := e.resolveStartup(envVars)
 	if err != nil {

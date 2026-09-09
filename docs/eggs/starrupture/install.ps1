@@ -1,0 +1,482 @@
+# StarRupture - win-wings Egg Installation Script
+#
+# Windows port of the Pterodactyl Linux egg. Server files land in $env:SERVER_DIR.
+#
+##
+#
+# Variables
+# STEAM_USER, STEAM_PASS, STEAM_AUTH - Steam user setup. Leave blank for anon install.
+# WINDOWS_INSTALL   - accepted and ignored; this host IS Windows
+# SRCDS_APPID       - Steam app id (StarRupture Dedicated Server = 3809400)
+# SRCDS_BETAID      - beta branch. Leave blank for the default branch
+# SRCDS_BETAPASS    - beta branch password, if required
+# INSTALL_FLAGS     - additional SteamCMD flags
+# STEAM_NO_HTTP2    - 1 to disable HTTP/2 downloads (workaround for stalled/0-byte
+#                     depot fetches on some networks). Default 0.
+# STEAM_RATE_KBPS   - optional download throttle in Kbps. Blank = unlimited.
+# AUTO_UPDATE       - 0/1, auto update on boot
+# ADMIN_PASSWORD    - admin password if any
+# PLAYER_PASSWORD   - server password if any
+#
+##
+
+# The nearest equivalent of `set -e`. It does NOT cover native executables, whose
+# failures show up only in $LASTEXITCODE, so those are checked individually.
+$ErrorActionPreference = 'Stop'
+
+# Invoke-WebRequest renders a progress bar by default, which on Windows
+# PowerShell 5.1 costs more time than the download itself on a slow link.
+$ProgressPreference = 'SilentlyContinue'
+
+# 5.1 defaults to TLS 1.0/1.1, which every host used here has long since
+# refused. Harmless on PowerShell 7, where it is already the default.
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+} catch {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
+
+$SteamRoot   = $env:SERVER_DIR
+$SteamCmdDir = Join-Path $SteamRoot 'steamcmd'
+
+# The daemon points TEMP at a scratch directory outside the sandbox, so it is
+# neither charged against the user's disk quota nor copied into backups.
+$TempDir = if ($env:TEMP) { $env:TEMP } else { Join-Path $SteamRoot '.install-tmp' }
+New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+function Write-Section {
+    param([string]$Text)
+    Write-Host '-----------------------------------------'
+    Write-Host $Text
+    Write-Host '-----------------------------------------'
+}
+
+# Write a file as UTF-8 with no BOM and LF endings.
+#
+# Set-Content -Encoding utf8 emits a BOM on Windows PowerShell 5.1, and the
+# default line ending is CRLF. Both break consumers that parse these files
+# byte-for-byte, .pteroignore included.
+function Write-TextFile {
+    param([string]$Path, [string]$Content)
+    $dir = Split-Path -Parent $Path
+    if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [System.IO.File]::WriteAllText($Path, ($Content -replace "`r`n", "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+## ---------------------------------------------------------------------------
+## Preflight
+##
+## The Linux script checked for curl, jq, unzip and tar because its install
+## image might not have them. Here they are language features: Invoke-WebRequest,
+## ConvertFrom-Json and Expand-Archive ship with PowerShell. What is worth
+## checking instead is that the daemon handed us a usable environment.
+## ---------------------------------------------------------------------------
+
+if (-not $SteamRoot) {
+    Write-Host 'SERVER_DIR is not set. This script must be run by win-wings. Aborting.'
+    exit 1
+}
+if (-not (Test-Path $SteamRoot)) {
+    Write-Host "SERVER_DIR ($SteamRoot) does not exist. Aborting."
+    exit 1
+}
+if (-not $env:SRCDS_APPID) {
+    Write-Host 'SRCDS_APPID is not set. Aborting.'
+    exit 1
+}
+
+$SteamUser = $env:STEAM_USER
+$SteamPass = $env:STEAM_PASS
+$SteamAuth = $env:STEAM_AUTH
+
+if ([string]::IsNullOrEmpty($SteamUser) -or [string]::IsNullOrEmpty($SteamPass)) {
+    Write-Host 'Steam user is not set. Using anonymous user.'
+    $SteamUser = 'anonymous'
+    $SteamPass = ''
+    $SteamAuth = ''
+} else {
+    Write-Host "Steam user set to $SteamUser"
+}
+
+## ---------------------------------------------------------------------------
+## Install SteamCMD
+##
+## The Windows build is a zip rather than a tarball, and the binary is
+## steamcmd.exe rather than steamcmd.sh. Same two mirrors: the Akamai host is
+## occasionally unreachable while media.steampowered.com is fine.
+## ---------------------------------------------------------------------------
+
+New-Item -ItemType Directory -Force -Path $SteamCmdDir | Out-Null
+$SteamCmdExe = Join-Path $SteamCmdDir 'steamcmd.exe'
+
+if (-not (Test-Path $SteamCmdExe)) {
+    $archive = Join-Path $TempDir 'steamcmd.zip'
+    $mirrors = @(
+        'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip',
+        'https://media.steampowered.com/client/installer/steamcmd.zip'
+    )
+
+    $downloaded = $false
+    foreach ($url in $mirrors) {
+        try {
+            Write-Host "Downloading SteamCMD from $url"
+            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 120
+            $downloaded = $true
+            break
+        } catch {
+            Write-Host "  mirror failed: $($_.Exception.Message)"
+        }
+    }
+    if (-not $downloaded) {
+        Write-Host 'Could not download SteamCMD from either mirror. Aborting.'
+        exit 1
+    }
+
+    Expand-Archive -Path $archive -DestinationPath $SteamCmdDir -Force
+    Remove-Item $archive -Force -ErrorAction SilentlyContinue
+
+    if (-not (Test-Path $SteamCmdExe)) {
+        Write-Host "steamcmd.exe was not found in the archive at $SteamCmdDir. Aborting."
+        exit 1
+    }
+}
+
+# SteamCMD writes appmanifest_*.acf here and errors out if the directory is absent.
+New-Item -ItemType Directory -Force -Path (Join-Path $SteamRoot 'steamapps') | Out-Null
+
+# The Linux script ran `chown -R root:root /mnt` here to work around SteamCMD
+# refusing to write. There is no equivalent, and none is needed: win-wings owns
+# the permissions on this tree and has already granted this account exclusive
+# write access to it.
+
+Set-Location $SteamCmdDir
+
+## ---------------------------------------------------------------------------
+## Environment diagnostics - these end up in the install log and are the first
+## thing to read when an install fails.
+##
+## Inodes have no NTFS equivalent and are dropped. Free space and MTU carry over.
+## ---------------------------------------------------------------------------
+
+Write-Host '----- disk (space) -----'
+try {
+    $qualifier = (Split-Path -Qualifier $SteamRoot).TrimEnd(':')
+    Get-PSDrive -Name $qualifier | Select-Object Name,
+        @{n = 'Used(GB)'; e = { [math]::Round($_.Used / 1GB, 1) }},
+        @{n = 'Free(GB)'; e = { [math]::Round($_.Free / 1GB, 1) }} | Format-Table | Out-String | Write-Host
+} catch { Write-Host "  unavailable: $($_.Exception.Message)" }
+
+Write-Host '----- network MTU -----'
+try {
+    Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop |
+        Where-Object { $_.ConnectionState -eq 'Connected' } |
+        Select-Object InterfaceAlias, NlMtu | Format-Table | Out-String | Write-Host
+} catch { Write-Host '  unavailable' }
+
+Write-Host '----- environment -----'
+Write-Host "  SERVER_DIR      = $SteamRoot"
+Write-Host "  TEMP            = $TempDir"
+Write-Host "  PowerShell      = $($PSVersionTable.PSVersion)"
+Write-Host "  Running as      = $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+Write-Host '------------------------'
+
+## ---------------------------------------------------------------------------
+## SteamCMD install with retry
+##
+## Notes carried over from the Linux egg, all of which still apply:
+##  - `validate` is skipped on the first attempt. On a clean directory it only
+##    adds a full rehash pass, and it makes a failing install slower to diagnose.
+##  - Partial downloads are NOT deleted between attempts. Wiping
+##    steamapps/downloading turns a transient CDN hiccup into three full-size
+##    redownloads. Only the appinfo cache is cleared, which is the piece that
+##    actually goes stale.
+##  - content_log.txt is dumped on failure rather than discarded.
+##
+## Two changes specific to this platform:
+##  - @sSteamCmdForcePlatformType is gone. The Linux egg forced the Windows depot
+##    because StarRupture ships no Linux server build; here the native platform
+##    is already the right one, and forcing it invites a mismatch with the
+##    running SteamCMD.
+##  - The HTTP/2 toggle is the Windows convar, not the Linux one.
+## ---------------------------------------------------------------------------
+
+$Retries   = 3
+$InstallOk = $false
+$AppId     = $env:SRCDS_APPID
+
+for ($i = 1; $i -le $Retries; $i++) {
+    Write-Host '==================================================='
+    Write-Host "SteamCMD install attempt $i of $Retries"
+    Write-Host '==================================================='
+
+    # A corrupt appinfo cache produces "state is 0x202" with 0/0 progress.
+    # app_info_update refreshes it; it does not repair it. Delete it instead.
+    if ($i -gt 1) {
+        Remove-Item (Join-Path $SteamRoot 'Steam\appcache\appinfo.vdf') `
+            -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Host "Priming Steam app info cache for $AppId..."
+    $prime = @('+login', $SteamUser)
+    if ($SteamPass) { $prime += $SteamPass }
+    if ($SteamAuth) { $prime += $SteamAuth }
+    $prime += @('+app_info_update', '1', '+app_info_print', $AppId, '+quit')
+    & $SteamCmdExe @prime *> $null
+
+    $steamArgs = @()
+
+    # Transport tuning, before login.
+    if ($env:STEAM_NO_HTTP2 -eq '1') {
+        $steamArgs += @('+@nClientDownloadEnableHTTP2PlatformWindows', '0')
+    }
+    if ($env:STEAM_RATE_KBPS) {
+        $steamArgs += @('+@nCSClientRateLimitKbps', $env:STEAM_RATE_KBPS)
+    }
+
+    $steamArgs += @('+force_install_dir', $SteamRoot, '+login', $SteamUser)
+    if ($SteamPass) { $steamArgs += $SteamPass }
+    if ($SteamAuth) { $steamArgs += $SteamAuth }
+
+    $steamArgs += @('+app_info_update', '1', '+app_update', $AppId)
+
+    if ($env:SRCDS_BETAID)   { $steamArgs += @('-beta', $env:SRCDS_BETAID) }
+    if ($env:SRCDS_BETAPASS) { $steamArgs += @('-betapassword', $env:SRCDS_BETAPASS) }
+
+    # Validate from the second attempt onward.
+    if ($i -gt 1) { $steamArgs += 'validate' }
+
+    # INSTALL_FLAGS is a free-text field, so it is split the way a shell would.
+    if ($env:INSTALL_FLAGS) {
+        $steamArgs += ($env:INSTALL_FLAGS -split '\s+' | Where-Object { $_ })
+    }
+    $steamArgs += '+quit'
+
+    # The Linux script printed the command with the Steam password in it. This
+    # log is shown in the Panel and kept on disk, so the credentials are masked.
+    $shown = $steamArgs | ForEach-Object {
+        if (($SteamPass -and $_ -eq $SteamPass) -or ($SteamAuth -and $_ -eq $SteamAuth)) {
+            '<redacted>'
+        } elseif ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+    }
+    Write-Host "Running command:`n  steamcmd.exe $($shown -join ' ')"
+
+    & $SteamCmdExe @steamArgs
+    $steamRc = $LASTEXITCODE
+
+    # steamcmd's exit code is not always trustworthy - confirm via the manifest.
+    # StateFlags=4 means k_EAppStateFullyInstalled.
+    $manifest = Join-Path $SteamRoot "steamapps\appmanifest_$AppId.acf"
+    if ($steamRc -eq 0 -and (Test-Path $manifest) -and
+        (Select-String -Path $manifest -Pattern '"StateFlags"\s*"4"' -Quiet)) {
+        Write-Host "SteamCMD install succeeded on attempt $i."
+        $InstallOk = $true
+        break
+    }
+
+    Write-Host "SteamCMD install failed on attempt $i (exit $steamRc)."
+
+    foreach ($pair in @(
+        @{ Path = 'Steam\logs\content_log.txt'; Lines = 60 },
+        @{ Path = 'Steam\logs\stderr.txt';      Lines = 30 }
+    )) {
+        $logPath = Join-Path $SteamRoot $pair.Path
+        if (Test-Path $logPath) {
+            Write-Host "----- tail of $($pair.Path) -----"
+            Get-Content $logPath -Tail $pair.Lines | Write-Host
+            Write-Host '---------------------------------------------'
+        }
+    }
+
+    if ($i -lt $Retries) {
+        $backoff = $i * 15
+        Write-Host "Retrying in ${backoff}s (partial download data preserved)..."
+        Start-Sleep -Seconds $backoff
+    }
+}
+
+if (-not $InstallOk) {
+    Write-Host '==================================================='
+    Write-Host "SteamCMD install failed after $Retries attempts."
+    Write-Host 'Directories preserved for inspection:'
+    Write-Host "  $SteamRoot\steamapps"
+    Write-Host "  $SteamRoot\Steam\logs"
+    Write-Host 'Aborting so this server is not marked as successfully installed.'
+    Write-Host '==================================================='
+    exit 1
+}
+
+## ---------------------------------------------------------------------------
+## Steam client library
+##
+## The Linux script copied steamclient.so into .steam/sdk32 and .steam/sdk64,
+## which is where the Linux Steamworks redistributable looks. Windows has no such
+## convention: it resolves steamclient64.dll through the Steam registry keys under
+## HKCU, which this account does not have because it has never run the Steam
+## client. Placing a copy next to the server binary is the equivalent, and is
+## what a Windows dedicated server without an installed Steam client needs.
+## ---------------------------------------------------------------------------
+
+$binariesDir = Join-Path $SteamRoot 'StarRupture\Binaries\Win64'
+New-Item -ItemType Directory -Force -Path $binariesDir | Out-Null
+
+foreach ($dll in @('steamclient64.dll', 'steamclient.dll', 'tier0_s64.dll', 'vstdlib_s64.dll')) {
+    $src = Join-Path $SteamCmdDir $dll
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $binariesDir $dll) -Force
+        Write-Host "Copied $dll to StarRupture\Binaries\Win64"
+    }
+}
+
+## ---------------------------------------------------------------------------
+## .pteroignore
+##
+## Patterns must start at column 0 - the original heredoc was indented, which
+## wrote four leading spaces onto every line, stopped the patterns matching, and
+## put the whole install into every backup. Written here with an explicit
+## BOM-less UTF-8 writer for the same reason.
+## ---------------------------------------------------------------------------
+
+$pteroignore = Join-Path $SteamRoot '.pteroignore'
+if (-not (Test-Path $pteroignore)) {
+    Write-Host 'Creating default .pteroignore'
+    Write-TextFile -Path $pteroignore -Content @'
+*
+!Password.json
+!PlayerPassword.json
+!DSSettings.txt
+!StarRupture/Saved/SaveGames/*/AutoSave0.met
+!StarRupture/Saved/SaveGames/*/AutoSave0.sav
+!StarRupture/Saved/SaveGames/SaveData.dat
+'@
+}
+
+## ---------------------------------------------------------------------------
+## GitHub release helper
+##
+## jq becomes ConvertFrom-Json, which Invoke-RestMethod does implicitly. Failure
+## returns $null rather than throwing, so that a GitHub rate limit skips one
+## optional component with a warning instead of failing the whole install - the
+## same behaviour the Linux script's `|| return 1` produced.
+## ---------------------------------------------------------------------------
+
+function Get-LatestReleaseAsset {
+    param(
+        [string]$Repo,
+        [scriptblock]$Filter
+    )
+    $headers = @{
+        'Accept'     = 'application/vnd.github+json'
+        'User-Agent' = 'win-wings-egg'   # GitHub rejects requests without one
+    }
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
+                -Headers $headers -UseBasicParsing -TimeoutSec 60
+            return ($release.assets | Where-Object $Filter | Select-Object -First 1)
+        } catch {
+            Write-Host "  GitHub API attempt ${attempt} failed: $($_.Exception.Message)"
+            if ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+        }
+    }
+    return $null
+}
+
+function Save-ReleaseAsset {
+    param([object]$Asset, [string]$Destination)
+    Write-Host "Downloading $($Asset.name)..."
+    Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Destination `
+        -UseBasicParsing -TimeoutSec 300
+}
+
+## ---------------------------------------------------------------------------
+## StarRupture ModLoader (server)
+## ---------------------------------------------------------------------------
+
+Write-Section 'Fetching latest StarRupture ModLoader Server release from GitHub...'
+
+$modLoaderAsset = Get-LatestReleaseAsset -Repo 'AlienXAXS/StarRupture-ModLoader' `
+    -Filter { $_.name -like 'StarRupture-ModLoader-Server*' }
+
+if (-not $modLoaderAsset) {
+    Write-Host 'Warning: no StarRupture-ModLoader-Server asset found in the latest release. Skipping ModLoader install.'
+} else {
+    $modLoaderZip = Join-Path $TempDir $modLoaderAsset.name
+    Save-ReleaseAsset -Asset $modLoaderAsset -Destination $modLoaderZip
+
+    Write-Host "Extracting $($modLoaderAsset.name) to $binariesDir..."
+    Expand-Archive -Path $modLoaderZip -DestinationPath $binariesDir -Force
+    Write-Host 'ModLoader installed successfully.'
+
+    $pluginConfigDir = Join-Path $binariesDir 'Plugins\config'
+    Write-TextFile -Path (Join-Path $pluginConfigDir 'ServerUtility.ini') -Content @'
+[General]
+Enabled=1
+[PluginSettings]
+MaxPlayers=0
+RemoteVulnerabilityPatch=1
+'@
+    Write-Host 'ServerUtility.ini created.'
+
+    $serverUtilityAsset = Get-LatestReleaseAsset -Repo 'AlienXAXS/StarRupture-Plugin-ServerUtility' `
+        -Filter { $_.name -like '*.zip' }
+
+    if (-not $serverUtilityAsset) {
+        Write-Host 'Warning: no ServerUtility release asset found. Skipping ServerUtility install.'
+    } else {
+        $serverUtilityZip = Join-Path $TempDir $serverUtilityAsset.name
+        Save-ReleaseAsset -Asset $serverUtilityAsset -Destination $serverUtilityZip
+        Expand-Archive -Path $serverUtilityZip -DestinationPath $binariesDir -Force
+        Write-Host 'ServerUtility installed successfully.'
+        Remove-Item $serverUtilityZip -Force -ErrorAction SilentlyContinue
+    }
+
+    Remove-Item $modLoaderZip -Force -ErrorAction SilentlyContinue
+}
+
+## ---------------------------------------------------------------------------
+## rcon-cli
+##
+## The Windows asset is a zip containing rcon.exe, not a tarball containing an
+## executable bit. No chmod equivalent is needed or possible.
+## ---------------------------------------------------------------------------
+
+Write-Section 'Installing rcon-cli...'
+
+$rconAsset = Get-LatestReleaseAsset -Repo 'gorcon/rcon-cli' `
+    -Filter { $_.name -match 'amd64_win(dows)?\.zip$' }
+
+if (-not $rconAsset) {
+    Write-Host 'Warning: no rcon-cli release asset found. Skipping rcon-cli install.'
+} else {
+    $rconZip     = Join-Path $TempDir $rconAsset.name
+    $rconExtract = Join-Path $TempDir 'rcon-cli'
+    Save-ReleaseAsset -Asset $rconAsset -Destination $rconZip
+
+    Remove-Item $rconExtract -Recurse -Force -ErrorAction SilentlyContinue
+    Expand-Archive -Path $rconZip -DestinationPath $rconExtract -Force
+
+    # The archive nests the binary inside a versioned directory.
+    $rconBin = Get-ChildItem -Path $rconExtract -Filter 'rcon.exe' -Recurse -File |
+        Select-Object -First 1
+    if ($rconBin) {
+        Copy-Item $rconBin.FullName (Join-Path $SteamRoot 'rcon.exe') -Force
+        Write-Host "rcon-cli installed to $SteamRoot\rcon.exe"
+        Write-Host 'Usage: .\rcon.exe -a 127.0.0.1:27015 -p yourpassword "command"'
+    } else {
+        Write-Host 'Warning: rcon.exe not found in the archive.'
+    }
+
+    Remove-Item $rconZip -Force -ErrorAction SilentlyContinue
+    Remove-Item $rconExtract -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+## ---------------------------------------------------------------------------
+## Save directory
+## ---------------------------------------------------------------------------
+
+New-Item -ItemType Directory -Force -Path (Join-Path $SteamRoot 'StarRupture\Saved\SaveGames') | Out-Null
+
+Write-Section 'Installation completed...'
+exit 0

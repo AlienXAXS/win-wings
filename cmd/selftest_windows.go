@@ -17,6 +17,7 @@ import (
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/internal/jobobject"
 	"github.com/pterodactyl/wings/internal/winacl"
+	"github.com/pterodactyl/wings/internal/winenv"
 	"github.com/pterodactyl/wings/internal/winpriv"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/internal/winuser"
@@ -656,22 +657,13 @@ func runAs(token windows.Token, dir string, argv []string, limits jobobject.Limi
 	}
 }
 
-// minimalEnvironment is what a process needs to run at all, plus a scratch
-// directory inside the server's own tree.
+// minimalEnvironment is the environment a real server gets.
 //
-// Deliberately not the daemon's own environment: that carries whatever the
-// service account was configured with, and a server has no business seeing it.
+// Built by the same code path rather than a copy of it, so that a mistake in
+// winenv.Base shows up here as a failed check instead of being reproduced
+// faithfully by a second implementation.
 func minimalEnvironment(dir string) []string {
-	root := os.Getenv("SystemRoot")
-	return []string{
-		"SystemRoot=" + root,
-		"SystemDrive=" + os.Getenv("SystemDrive"),
-		"windir=" + root,
-		"PATH=" + filepath.Join(root, "System32") + string(os.PathListSeparator) + root,
-		"TEMP=" + dir,
-		"TMP=" + dir,
-		"PATHEXT=.COM;.EXE;.BAT;.CMD",
-	}
+	return winenv.Base(winenv.Paths{Data: dir, Temp: dir})
 }
 
 func comspec() string {
