@@ -806,6 +806,21 @@ func (w *Worker) Stop(p wire.Stop) {
 			} else if w.awaitExit("the stop command", timeout, started) {
 				return
 			}
+
+			// Not every server reads stdin. One that opens a console of its own
+			// -- a modloader started with -console, say -- reads the console's
+			// input buffer instead, which a redirected pipe never reaches. The
+			// same text typed into that buffer is indistinguishable from somebody
+			// at a keyboard, so it is worth a try before escalating to something
+			// the server has to be killed by.
+			w.Log(wire.LogInfo, "the server did not act on the stop command; typing it into "+
+				"the console input buffer instead", "command", p.Value)
+			if err := proc.TypeLine(p.Value); err != nil {
+				w.Log(wire.LogWarn, "could not type the stop command into the console",
+					"command", p.Value, "error", err.Error())
+			} else if w.awaitExit("typing the stop command", timeout, started) {
+				return
+			}
 		}
 		fallthrough
 
