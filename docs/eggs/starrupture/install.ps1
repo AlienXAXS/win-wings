@@ -59,13 +59,38 @@ try {
     try { [System.Net.WebRequest]::DefaultWebProxy = $null } catch { }
 }
 
-$SteamRoot   = $env:SERVER_DIR
-$SteamCmdDir = Join-Path $SteamRoot 'steamcmd'
+$SteamRoot = $env:SERVER_DIR
 
 # The daemon points TEMP at a scratch directory outside the sandbox, so it is
-# neither charged against the user's disk quota nor copied into backups.
-$TempDir = if ($env:TEMP) { $env:TEMP } else { Join-Path $SteamRoot '.install-tmp' }
+# neither charged against the user's disk quota nor copied into backups. It lives
+# for as long as the server does and is removed with it.
+$TempDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+# SteamCMD must live OUTSIDE the install directory, which is where the Linux egg
+# put it and where a straight port would put it too.
+#
+# steamcmd.exe treats its own directory as the Steam root. Asking it to install
+# into an ancestor of that directory makes the install path contain the Steam
+# folder, which it refuses:
+#
+#   Please set the game install path to something other than the Steam install
+#   folder
+#
+# It does not fail when it says this. It ignores +force_install_dir, installs
+# into its own steamapps\common instead, reports "Success! App ... fully
+# installed", and exits 0 - so the game lands one directory too deep, no
+# appmanifest appears where anything looks for it, and the server has nothing to
+# run. That is what makes this worth a paragraph rather than a line.
+#
+# On Linux none of this arises: steamcmd.sh roots itself at ~/Steam regardless of
+# where the script lives, so /mnt/server/steamcmd with an install path of
+# /mnt/server is fine. This is a genuine platform difference, not a port mistake.
+#
+# The scratch directory is the right home for it: outside the install path, on
+# the same volume so committing a download is a move rather than a copy, writable
+# by this account, and removed along with the server.
+$SteamCmdDir = Join-Path $TempDir 'steamcmd'
 
 function Write-Section {
     param([string]$Text)
@@ -136,6 +161,20 @@ if (-not (Test-Path $SteamRoot)) {
 }
 if (-not $env:SRCDS_APPID) {
     Write-Host 'SRCDS_APPID is not set. Aborting.'
+    exit 1
+}
+
+# Asserted rather than assumed, because the failure it prevents is silent: an
+# install that reports success and puts the game somewhere nothing looks.
+$rootFull = [System.IO.Path]::GetFullPath($SteamRoot).TrimEnd('\')
+$cmdFull  = [System.IO.Path]::GetFullPath($SteamCmdDir).TrimEnd('\')
+if ($cmdFull.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $cmdFull.Equals($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
+    Write-Host "SteamCMD would be installed inside the game install path:"
+    Write-Host "  install path = $rootFull"
+    Write-Host "  steamcmd     = $cmdFull"
+    Write-Host 'SteamCMD refuses that and silently installs to the wrong place instead.'
+    Write-Host 'This means TEMP is not pointing outside SERVER_DIR. Aborting.'
     exit 1
 }
 
@@ -303,8 +342,35 @@ for ($i = 1; $i -le $Retries; $i++) {
     }
     Write-Host "Running command:`n  steamcmd.exe $($shown -join ' ')"
 
-    & $SteamCmdExe @steamArgs
-    $steamRc = $LASTEXITCODE
+    # Captured as well as shown, so the refusal below can be detected. SteamCMD
+    # reports it on stdout and still exits 0, so the exit code alone cannot.
+    #
+    # ErrorActionPreference is relaxed across this one call. With it set to Stop,
+    # a native command whose stderr is redirected into the pipeline raises
+    # NativeCommandError on the first line it writes there, which would abort the
+    # install on output steamcmd considers routine.
+    $previousEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $steamOut = & $SteamCmdExe @steamArgs 2>&1 | ForEach-Object {
+            Write-Host $_
+            $_
+        }
+        $steamRc = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousEAP
+    }
+
+    if ($steamOut -match 'install path to something other than the Steam install folder') {
+        Write-Host ''
+        Write-Host 'SteamCMD refused the install path because it contains the SteamCMD'
+        Write-Host 'directory, and installed to its own library instead. The game is not'
+        Write-Host 'where the server expects it. Aborting rather than retrying, because'
+        Write-Host 'every attempt will do the same thing.'
+        Write-Host "  install path = $SteamRoot"
+        Write-Host "  steamcmd     = $SteamCmdDir"
+        exit 1
+    }
 
     # steamcmd's exit code is not always trustworthy - confirm via the manifest.
     #
