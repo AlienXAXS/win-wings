@@ -34,15 +34,39 @@ import (
 //   - Coord packing in x/sys/windows (verified correct against its source)
 //   - closing vs retaining the PTY-side handles
 //
-// The most likely remaining explanation is the window station or session this
-// test process runs in. Console attachment is session-sensitive, and these tests
-// execute under a non-interactive shell rather than a normal desktop session.
-// That would not affect the worker running as a service, but it does mean this
-// must be re-verified on a real Windows host before ConPTY is relied upon.
+// The session hypothesis is DISPROVEN. It failed identically on a real Windows
+// Server 2025 host, both from an interactive RDP session and as SYSTEM in
+// session 0 via a scheduled task. Whatever this is, it is not the session.
 //
-// Until then the worker defaults to pipe mode, which is fully working. ConPTY is
-// only needed for processes that detect a non-console stdout and change
-// behaviour — steamcmd being the usual case.
+// Since then, two further symptoms have been separated:
+//
+//   - The child now dies with STATUS_DLL_INIT_FAILED (0xC0000142) before running
+//     any of its own code, as well as producing no output.
+//   - An exact inline replica of the EchoCon sequence exits 0 where Start fails,
+//     with byte-identical CreateProcess arguments (flags 0x80400, bInheritHandles
+//     FALSE, cb 112, no lpDesktop). The difference is inside setupPseudoConsole.
+//
+// The one difference setupPseudoConsole has from the replica is that it wraps our
+// ends of the pipes in os.NewFile before CreateProcess. An A/B in a single
+// process -- identical but for those two calls -- turned exit 0 into 0xC0000142.
+// That is a real signal and os.NewFile associating a pipe handle with the Go
+// runtime's completion port is a plausible mechanism, but it does NOT fully
+// explain the failure: a later run of the raw, unwrapped configuration failed the
+// same way. There is a nondeterministic component still unaccounted for.
+//
+// Also ruled out since: CREATE_SUSPENDED (Start fails without it too).
+//
+// Traps for whoever picks this up -- both cost several runs:
+//
+//   - ClosePseudoConsole blocks until the output pipe is drained, so a diagnostic
+//     that closes it without a reader deadlocks.
+//   - CloseHandle on the output pipe blocks while a synchronous ReadFile is
+//     pending on it. Tear the child down first.
+//
+// The worker defaults to pipe mode, which is fully working. ConPTY is needed for
+// processes that detect a non-console stdout and change behaviour (steamcmd being
+// the usual case), and now also for the ctrl+c stop mode, which cannot be
+// delivered without a console. Both are unavailable until this is solved.
 //
 // Run these on a clean Windows VM with:
 //
