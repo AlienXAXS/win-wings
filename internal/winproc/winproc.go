@@ -438,6 +438,29 @@ func (p *Process) CtrlBreak() error {
 	return nil
 }
 
+// CtrlC delivers a Ctrl+C to the process.
+//
+// There is no signal to send. This is done the way a keyboard does it: the byte
+// 0x03 is written to the console input, and the console driver raises a
+// CTRL_C_EVENT in every process attached to that console. GenerateConsoleCtrlEvent
+// is no help here -- it cannot target CTRL_C_EVENT at a process group -- so the
+// pseudo console's input side is the only route to a single server.
+//
+// The corollary is that a server given plain pipes cannot be sent one at all:
+// there is no console, so there is nothing to translate the byte.
+func (p *Process) CtrlC() error {
+	if p.console() == 0 {
+		return fmt.Errorf("winproc: ctrl-c needs a pseudo console; this process was given plain pipes")
+	}
+	if p.stdin == nil {
+		return fmt.Errorf("winproc: ctrl-c: the process has no console input")
+	}
+	if _, err := p.stdin.Write([]byte{0x03}); err != nil {
+		return fmt.Errorf("winproc: ctrl-c: %w", err)
+	}
+	return nil
+}
+
 // Resize changes the pseudo console dimensions. No-op without one.
 func (p *Process) Resize(cols, rows uint16) error {
 	pty := p.console()

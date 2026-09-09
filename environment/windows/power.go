@@ -437,7 +437,7 @@ func (e *Environment) Attach(ctx context.Context) error {
 // Stop asks the server to shut down gracefully.
 func (e *Environment) Stop(ctx context.Context) error {
 	e.mu.RLock()
-	c, stop := e.client, e.meta.Stop
+	c, stop, pty := e.client, e.meta.Stop, e.meta.PseudoConsole
 	e.mu.RUnlock()
 
 	if c == nil {
@@ -455,6 +455,24 @@ func (e *Environment) Stop(ctx context.Context) error {
 		msg.Value = stop.Value
 
 	case remote.ProcessStopSignal, remote.ProcessStopNativeStop:
+		// A POSIX signal name is what an unmodified egg carries here, and it means
+		// nothing on Windows. The egg's Windows profile can ask for ctrl+c instead,
+		// which is a real interrupt and is what most console servers shut down on;
+		// it needs a pseudo console to be delivered through, so a profile choosing
+		// it must enable one.
+		if isCtrlC(stop.Value) {
+			msg.Mode = wire.StopCtrlC
+			if !pty {
+				// Caught here rather than left to fail in the worker, because the
+				// fix is a profile setting and the operator is reading this log to
+				// find out why their server was killed.
+				e.log().Warn("this egg stops with ctrl+c but does not enable the pseudo " +
+					"console; there is no console to deliver it through. Turn on the " +
+					"pseudo console in the egg's windows profile")
+			}
+			break
+		}
+
 		// Neither of these exists here. A POSIX signal has no Windows equivalent,
 		// and a "native stop" means `docker stop`, which is SIGTERM followed by a
 		// kill. CTRL_BREAK is the nearest thing to both; it is widely unhandled by
@@ -492,6 +510,19 @@ func (e *Environment) Stop(ctx context.Context) error {
 	}).Debug("asking the worker to stop the server")
 
 	return c.Stop(msg)
+}
+
+// isCtrlC reports whether a stop value is asking for an interrupt.
+//
+// The spellings are the ones an operator plausibly types into the Panel. SIGINT
+// is included because that is what an interrupt is called everywhere else, and
+// an egg that already carries it means exactly this.
+func isCtrlC(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "ctrl_c", "ctrl+c", "ctrlc", "^c", "sigint":
+		return true
+	}
+	return false
 }
 
 // WaitForStop stops the server and waits for it to exit, optionally killing it

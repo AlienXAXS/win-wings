@@ -15,7 +15,9 @@ and a stop configuration that may be a POSIX signal. On Windows:
 - The container image means nothing; what matters is what runtime is on the host.
 - The startup command usually needs rewriting — different binary names,
   backslash paths, and no shell, so `&&`, `|` and `>` are not interpreted.
-- A signal-based stop cannot work. Windows has no signals.
+- A signal-based stop cannot work as written. Windows has no signals; the
+  nearest equivalent is a console interrupt, which has to be asked for
+  explicitly and needs a console to be delivered through.
 
 None of that fits in the existing egg schema, and the daemon cannot guess it.
 
@@ -83,10 +85,29 @@ plugin outage cannot stop a node from booting servers it already knows about.
 | `runtime` | string | Which runtime this egg needs — see below. Empty falls back to the egg's `container_image`. |
 | `startup` | string | Windows startup command. Empty uses the Panel's standard startup value. Supports `{{VAR}}` and `${VAR}`. |
 | `stop.type` | string | `command` or `signal`. |
-| `stop.value` | string | For `command`, the text written to stdin (`stop`, `end`, `quit`). |
+| `stop.value` | string | For `command`, the text written to stdin (`stop`, `end`, `quit`). For `signal`, one of `ctrl_c`, `ctrl+c`, `ctrlc`, `^c` or `sigint` to request an interrupt; anything else falls back to CTRL_BREAK. |
 | `pseudo_console` | bool | Allocate a ConPTY rather than pipes. Only for processes that detect a non-console stdout — steamcmd being the usual case. |
 
 Omitting `stop` entirely uses the egg's standard stop configuration.
+
+#### Stopping a server
+
+Three mechanisms exist, and they are not equivalent.
+
+| `stop.type` | `stop.value` | What the daemon does |
+|---|---|---|
+| `command` | the text | Writes it to stdin. Works for any server with a console command, needs no pseudo console, and is the right answer wherever it is available. |
+| `signal` | `ctrl_c` (and spellings) | Writes `0x03` to the server's console input, which the console driver turns into a real `CTRL_C_EVENT`. **Requires `pseudo_console: true`** — without a console there is nothing to translate the byte, and the stop degrades to a kill. |
+| `signal` | anything else | Attempts `CTRL_BREAK_EVENT`. Not deliverable to a pipe-backed process, so in practice this is a kill. |
+| omitted, or unrecognised | — | The server is killed. |
+
+Every attempt escalates on a timeout: the chosen mechanism, then CTRL_BREAK,
+then terminating the Job Object. Each step and its outcome is logged, including
+how long the server was given.
+
+A POSIX signal name such as `SIGTERM` inherited from an unmodified egg is not a
+stop configuration on Windows. `SIGINT` is the one exception, and only because it
+is read as a request for `ctrl_c`.
 
 #### Runtime names
 

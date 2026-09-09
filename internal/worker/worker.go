@@ -809,6 +809,17 @@ func (w *Worker) Stop(p wire.Stop) {
 		}
 		fallthrough
 
+	case wire.StopCtrlC:
+		w.Log(wire.LogInfo, "sending ctrl+c to the server's console", "pid", pid)
+		if err := proc.CtrlC(); err != nil {
+			w.Log(wire.LogWarn, "could not send ctrl+c; the server needs a pseudo console "+
+				"for this to work. Enable it in the egg's windows profile",
+				"pid", pid, "error", err.Error())
+		} else if w.awaitExit("ctrl+c", timeout, started) {
+			return
+		}
+		fallthrough
+
 	case wire.StopCtrlBreak:
 		w.Log(wire.LogInfo, "sending ctrl+break to the process group", "pid", pid)
 		if err := proc.CtrlBreak(); err != nil {
