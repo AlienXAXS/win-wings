@@ -352,6 +352,12 @@ a non-console stdout and drops output. Set `pseudo_console` on the egg's Windows
 profile. Note that ConPTY is currently unverified; see
 `internal/winproc/conpty_diag_test.go`.
 
+**Install output arrives all at once at the end** — the installer's C runtime
+switches stdout from line to full buffering when it is not a console, so the
+output is not lost, just delivered in blocks. Installs get a ConPTY by default
+(`console.install_pseudo_console`); if that has been turned off, or allocation
+failed, the log records the fallback.
+
 **Server starts but ignores its port** — expected. Nothing enforces the
 allocation; the egg's startup command must pass `{{SERVER_IP}}` and
 `{{SERVER_PORT}}` through.

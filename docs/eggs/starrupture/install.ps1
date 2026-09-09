@@ -266,7 +266,7 @@ for ($i = 1; $i -le $Retries; $i++) {
     # A corrupt appinfo cache produces "state is 0x202" with 0/0 progress.
     # app_info_update refreshes it; it does not repair it. Delete it instead.
     if ($i -gt 1) {
-        Remove-Item (Join-Path $SteamRoot 'Steam\appcache\appinfo.vdf') `
+        Remove-Item (Join-Path $SteamCmdDir 'appcache\appinfo.vdf') `
             -Force -ErrorAction SilentlyContinue
     }
 
@@ -318,22 +318,44 @@ for ($i = 1; $i -le $Retries; $i++) {
     $steamRc = $LASTEXITCODE
 
     # steamcmd's exit code is not always trustworthy - confirm via the manifest.
-    # StateFlags=4 means k_EAppStateFullyInstalled.
-    $manifest = Join-Path $SteamRoot "steamapps\appmanifest_$AppId.acf"
-    if ($steamRc -eq 0 -and (Test-Path $manifest) -and
-        (Select-String -Path $manifest -Pattern '"StateFlags"\s*"4"' -Quiet)) {
-        Write-Host "SteamCMD install succeeded on attempt $i."
+    #
+    # StateFlags is a bitfield, not a value. k_EAppStateFullyInstalled is bit 4,
+    # and a healthy install routinely carries more than that bit alone: 6 is
+    # fully installed with an update available, and the 1024 bit shows up while
+    # an update is queued. Matching the literal string "4" therefore rejects
+    # installs that succeeded, and did - steamcmd printed "Success! App ... fully
+    # installed" and this called it a failure and started over.
+    $manifest  = Join-Path $SteamRoot "steamapps\appmanifest_$AppId.acf"
+    $installed = $false
+    $stateNote = 'no appmanifest was written'
+
+    if (Test-Path $manifest) {
+        $match = Select-String -Path $manifest -Pattern '"StateFlags"\s*"(\d+)"' |
+            Select-Object -First 1
+        if (-not $match) {
+            $stateNote = 'the appmanifest has no StateFlags'
+        } else {
+            $state = [int]$match.Matches[0].Groups[1].Value
+            $installed = ($state -band 4) -eq 4
+            $stateNote = "StateFlags=$state"
+        }
+    }
+
+    if ($steamRc -eq 0 -and $installed) {
+        Write-Host "SteamCMD install succeeded on attempt $i ($stateNote)."
         $InstallOk = $true
         break
     }
 
-    Write-Host "SteamCMD install failed on attempt $i (exit $steamRc)."
+    Write-Host "SteamCMD install failed on attempt $i (exit $steamRc, $stateNote)."
 
+    # These live under the steamcmd directory rather than the install directory:
+    # force_install_dir moves the game, not steamcmd's own working files.
     foreach ($pair in @(
-        @{ Path = 'Steam\logs\content_log.txt'; Lines = 60 },
-        @{ Path = 'Steam\logs\stderr.txt';      Lines = 30 }
+        @{ Path = 'logs\content_log.txt'; Lines = 60 },
+        @{ Path = 'logs\stderr.txt';      Lines = 30 }
     )) {
-        $logPath = Join-Path $SteamRoot $pair.Path
+        $logPath = Join-Path $SteamCmdDir $pair.Path
         if (Test-Path $logPath) {
             Write-Host "----- tail of $($pair.Path) -----"
             Get-Content $logPath -Tail $pair.Lines | Write-Host
@@ -353,7 +375,7 @@ if (-not $InstallOk) {
     Write-Host "SteamCMD install failed after $Retries attempts."
     Write-Host 'Directories preserved for inspection:'
     Write-Host "  $SteamRoot\steamapps"
-    Write-Host "  $SteamRoot\Steam\logs"
+    Write-Host "  $SteamCmdDir\logs"
     Write-Host 'Aborting so this server is not marked as successfully installed.'
     Write-Host '==================================================='
     exit 1

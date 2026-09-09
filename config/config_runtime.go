@@ -109,6 +109,24 @@ type ConsoleConfiguration struct {
 	// better logs on plain pipes.
 	PseudoConsole bool `default:"false" json:"pseudo_console" yaml:"pseudo_console"`
 
+	// InstallPseudoConsole allocates a ConPTY for installation scripts.
+	//
+	// On by default, which is the opposite of the setting above, because an
+	// install and a running server want opposite things. A server's console is
+	// read for a long time by software, and clean lines are worth more than
+	// liveness. An install is watched by a person for a couple of minutes and
+	// then thrown away, and liveness is the entire point.
+	//
+	// Handed a plain pipe, the C runtime that steamcmd and most other installers
+	// are built on switches stdout from line buffering to full buffering. The
+	// output is not lost, it just arrives in 4KB blocks — which for a download
+	// that takes twenty minutes means an empty console and then everything at
+	// once, exactly when somebody is watching to see whether it is progressing.
+	//
+	// Turn it off if an egg's installer produces unreadable output through a
+	// ConPTY; allocation failing is handled without it, by falling back to pipes.
+	InstallPseudoConsole bool `default:"true" json:"install_pseudo_console" yaml:"install_pseudo_console"`
+
 	// Columns and Rows size the pseudo console when one is allocated. Some
 	// processes wrap or truncate output to the reported width.
 	Columns uint16 `default:"200" json:"columns" yaml:"columns"`

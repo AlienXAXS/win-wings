@@ -407,10 +407,14 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return "", errors.WrapIf(err, "install: could not obtain the server's install account")
 	}
 
+	console := config.Get().Runtime.Console
 	cfg := winproc.Config{
-		Argv: argv,
-		Dir:  ip.Server.Filesystem().Path(),
-		Env:  ip.installEnvironment(),
+		Argv:          argv,
+		Dir:           ip.Server.Filesystem().Path(),
+		Env:           ip.installEnvironment(),
+		PseudoConsole: console.InstallPseudoConsole,
+		Cols:          console.Columns,
+		Rows:          console.Rows,
 	}
 	if username != "" {
 		token, err := winproc.LogonUser(username, password)
@@ -424,6 +428,17 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	ip.Server.Events().Publish(DaemonMessageEvent, "Running installation script...")
 
 	proc, err := winproc.Start(cfg, job)
+	if err != nil && cfg.PseudoConsole {
+		// A ConPTY is a convenience, not a requirement. Rather than fail an
+		// install on a host where one cannot be allocated -- an unusual console
+		// host, a locked-down build -- fall back to pipes and say so, since the
+		// symptom afterwards is output that only arrives at the end.
+		ip.Server.Log().WithField("error", err).
+			Warn("could not allocate a pseudo console for the install; falling back to " +
+				"pipes, which means output will arrive in blocks rather than live")
+		cfg.PseudoConsole = false
+		proc, err = winproc.Start(cfg, job)
+	}
 	if err != nil {
 		return "", errors.WrapIf(err, "install: failed to start installation script")
 	}
