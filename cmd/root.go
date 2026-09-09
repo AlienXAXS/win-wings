@@ -26,6 +26,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/pterodactyl/wings/config"
+	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/internal/cron"
 	"github.com/pterodactyl/wings/internal/database"
@@ -464,6 +465,10 @@ func initLogging() {
 	}
 	log.SetHandler(multi.New(cli.Default, cli.New(w, false)))
 	log.WithField("path", p).Info("writing log files to disk")
+
+	// winproc is shared with the worker binary and logs through neither
+	// facility by default, so each binary points it at its own.
+	winproc.Warn = func(msg string) { log.Warn(msg) }
 }
 
 // Prints the wings logo, nothing special here!

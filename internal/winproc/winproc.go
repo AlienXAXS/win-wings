@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/pterodactyl/wings/internal/jobobject"
+	"github.com/pterodactyl/wings/internal/winsta"
 )
 
 // procThreadAttributePseudoConsole is PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
@@ -47,6 +48,11 @@ type Config struct {
 	// Token, when non-zero, runs the process as that account. Zero runs it as
 	// the account the worker itself runs as.
 	Token windows.Token
+
+	// Desktop names the window station and desktop to launch on, as
+	// "station\desktop". Empty means Start works it out, which is what every
+	// caller wants: see winsta.
+	Desktop string
 
 	// PseudoConsole allocates a ConPTY rather than plain pipes.
 	//
@@ -118,6 +124,32 @@ func Start(cfg Config, job *jobobject.Job) (p *Process, err error) {
 
 	var si windows.StartupInfoEx
 	si.Cb = uint32(unsafe.Sizeof(si))
+
+	// A process launched under a different account has to be given access to a
+	// window station and desktop, and told which. Without it user32 fails to
+	// connect during process startup and the process dies in the loader with
+	// STATUS_DLL_INIT_FAILED, having run none of its own code -- which is not a
+	// diagnosable error message, it is an exit code.
+	//
+	// Best effort: a host where this cannot be done is a host where the launch
+	// was going to fail anyway, and reporting the underlying failure is more use
+	// than replacing it with this one. The warning says what happened.
+	desktop := cfg.Desktop
+	if desktop == "" && cfg.Token != 0 {
+		if d, gerr := winsta.GrantToToken(cfg.Token); gerr != nil {
+			Warn(fmt.Sprintf("could not grant %q access to a desktop; if it fails to start "+
+				"with 0xC0000142 this is why: %v", cfg.Argv[0], gerr))
+		} else {
+			desktop = d
+		}
+	}
+	if desktop != "" {
+		var d *uint16
+		if d, err = windows.UTF16PtrFromString(desktop); err != nil {
+			return nil, fmt.Errorf("winproc: desktop %q: %w", desktop, err)
+		}
+		si.Desktop = d
+	}
 
 	flags := uint32(windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_SUSPENDED)
 

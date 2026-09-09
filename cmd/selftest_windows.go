@@ -21,6 +21,7 @@ import (
 	"github.com/pterodactyl/wings/internal/winfw"
 	"github.com/pterodactyl/wings/internal/winpriv"
 	"github.com/pterodactyl/wings/internal/winproc"
+	"github.com/pterodactyl/wings/internal/winsta"
 	"github.com/pterodactyl/wings/internal/winuser"
 )
 
@@ -215,6 +216,24 @@ func runSelfTest(keep bool) error {
 		c := config.Get()
 		return fmt.Sprintf("%s (isolation=%s data=%s)",
 			configPath, c.System.Account.Isolation, c.System.Data), nil
+	})
+
+	s.run("window station", func() (string, error) {
+		// The most useful single fact when a process dies with 0xC0000142.
+		// Service-0x0-3e7$ means the daemon is running as a service and every
+		// process it launches under another account needs an explicit grant on
+		// that station; WinSta0 means it is running in a console, where the
+		// grant usually already exists and this check therefore proves less
+		// than it appears to.
+		name, err := winsta.Current()
+		if err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(strings.ToLower(name), "winsta0") {
+			return name + " (a console session; the service runs on Service-0x0-3e7$ " +
+				"instead, which is stricter)", nil
+		}
+		return name, nil
 	})
 
 	s.run("worker binary present", func() (string, error) {

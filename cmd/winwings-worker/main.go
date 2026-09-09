@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/internal/worker"
 )
 
@@ -43,6 +44,13 @@ func main() {
 	// delete its own console history, and its data directory is writable by it.
 	if cfg.LogPath == "" {
 		cfg.LogPath = filepath.Join(instanceDir, "console.log")
+	}
+
+	// The worker launches the game server under its own account, which is where
+	// a desktop grant can fail. It has no logger, so warnings go to stderr,
+	// which the daemon captures.
+	winproc.Warn = func(msg string) {
+		fmt.Fprintln(os.Stderr, "winwings-worker: "+msg)
 	}
 
 	w := worker.New(*cfg)
