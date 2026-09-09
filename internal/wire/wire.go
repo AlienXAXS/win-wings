@@ -89,6 +89,15 @@ const (
 	TypeError MessageType = "error"
 	// TypePong answers TypePing.
 	TypePong MessageType = "pong"
+	// TypeLog carries a worker's own diagnostic output, as distinct from the
+	// game server's console.
+	//
+	// A worker is spawned detached with no stdio, so anything it writes about
+	// itself is otherwise lost: how it resolved the startup command, why a logon
+	// failed, which desktop it granted. Relaying it up the control pipe puts it
+	// in the daemon's log next to everything else about that server, which is
+	// where somebody looking for it will be.
+	TypeLog MessageType = "log"
 )
 
 // Envelope is the outer frame of every message.
@@ -287,6 +296,27 @@ type Exit struct {
 	// Terminated reports that the worker killed the process rather than it
 	// exiting on its own.
 	Terminated bool `json:"terminated"`
+}
+
+// LogLevel is the severity of a Log message. Deliberately the same vocabulary
+// the daemon's logger uses, so relaying one needs no translation.
+type LogLevel string
+
+const (
+	LogDebug LogLevel = "debug"
+	LogInfo  LogLevel = "info"
+	LogWarn  LogLevel = "warn"
+	LogError LogLevel = "error"
+)
+
+// Log is one line of a worker's own diagnostic output.
+type Log struct {
+	Level   LogLevel `json:"level"`
+	Message string   `json:"message"`
+	// Fields carries structured context. Kept as strings because this crosses a
+	// process boundary as JSON and arrives at a logger that will render it as
+	// text anyway; typed values would only survive to be flattened again.
+	Fields map[string]string `json:"fields,omitempty"`
 }
 
 // Error reports a worker-side failure.

@@ -407,6 +407,22 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return "", errors.WrapIf(err, "install: could not obtain the server's install account")
 	}
 
+	// The install path has a lot of ways to stall silently -- a logon that hangs
+	// on a domain controller, a script the account cannot read, a ConPTY that
+	// never yields output. Recording each step means "it says it is installing
+	// and nothing is happening" has an answer in the log rather than requiring a
+	// debugger.
+	account := username
+	if account == "" {
+		account = "(the daemon's own account -- no isolation)"
+	}
+	ip.Server.Log().WithFields(log.Fields{
+		"script":      ip.scriptPath(),
+		"working_dir": ip.Server.Filesystem().Path(),
+		"account":     account,
+		"powershell":  powershell,
+	}).Debug("install: prepared the installation script and environment")
+
 	console := config.Get().Runtime.Console
 	cfg := winproc.Config{
 		Argv:          argv,
@@ -423,6 +439,8 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		}
 		defer token.Close()
 		cfg.Token = token
+		ip.Server.Log().WithField("account", username).
+			Debug("install: logged on the install account")
 	}
 
 	ip.Server.Events().Publish(DaemonMessageEvent, "Running installation script...")
@@ -443,6 +461,11 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return "", errors.WrapIf(err, "install: failed to start installation script")
 	}
 	defer proc.Close()
+
+	ip.Server.Log().WithFields(log.Fields{
+		"pid":            proc.Pid,
+		"pseudo_console": cfg.PseudoConsole,
+	}).Debug("install: installation script is running")
 
 	// Stream output to the install sink so administrators can watch it in the
 	// Panel, while accumulating it for the log file.
@@ -468,6 +491,11 @@ func (ip *InstallationProcess) Execute() (string, error) {
 
 	code, waitErr := proc.Wait()
 	<-done
+
+	ip.Server.Log().WithFields(log.Fields{
+		"exit_code":    code,
+		"output_bytes": sb.Len(),
+	}).Debug("install: installation script exited")
 
 	if waitErr != nil {
 		return sb.String(), errors.WrapIf(waitErr, "install: failed waiting on installation script")

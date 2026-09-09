@@ -80,7 +80,20 @@ type Environment struct {
 
 	// token authenticates this daemon to the worker.
 	token string
+
+	// watchdog guards against more than one reconnection attempt running at a
+	// time. See watchdog.go.
+	watchdog system.AtomicBool
+
+	// ctx bounds work that outlives a single call -- the reconnection watchdog
+	// being the only such work today. Cancelled when the server is destroyed, so
+	// that a watchdog does not keep talking about a server that no longer exists.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
+
+// Context returns the environment's lifetime context.
+func (e *Environment) Context() context.Context { return e.ctx }
 
 // New creates a Windows environment for a server. The worker is not started
 // here; that happens on Create.
@@ -93,6 +106,7 @@ func New(id string, m *Metadata, c *environment.Configuration) (*Environment, er
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Environment{
 		Id:            id,
 		Configuration: c,
@@ -100,6 +114,8 @@ func New(id string, m *Metadata, c *environment.Configuration) (*Environment, er
 		st:            system.NewAtomicString(environment.ProcessOfflineState),
 		emitter:       events.NewBus(),
 		token:         token,
+		ctx:           ctx,
+		cancel:        cancel,
 	}, nil
 }
 
@@ -312,6 +328,10 @@ func (e *Environment) applyFirewall() {
 
 // Destroy stops the server and removes its worker state.
 func (e *Environment) Destroy() error {
+	// Stops the reconnection watchdog before the worker is shut down, so a
+	// deliberate teardown is not mistaken for a worker that died.
+	e.cancel()
+
 	e.mu.RLock()
 	c := e.client
 	e.mu.RUnlock()

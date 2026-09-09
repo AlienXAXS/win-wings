@@ -157,6 +157,26 @@ func (e *Environment) handlers() worker.Handlers {
 			}
 		},
 
+		// Worker diagnostics, logged against this server so that "why did it not
+		// start" is answered in the same place the question is asked. The worker
+		// chose the level; it uses the same vocabulary this logger does.
+		Log: func(p wire.Log) {
+			entry := e.log().WithField("source", "worker")
+			for k, v := range p.Fields {
+				entry = entry.WithField(k, v)
+			}
+			switch p.Level {
+			case wire.LogError:
+				entry.Error(p.Message)
+			case wire.LogWarn:
+				entry.Warn(p.Message)
+			case wire.LogInfo:
+				entry.Info(p.Message)
+			default:
+				entry.Debug(p.Message)
+			}
+		},
+
 		Stats: func(p wire.Stats) {
 			e.Events().Publish(environment.ResourceEvent, environment.Stats{
 				Memory:      p.MemoryBytes,
@@ -179,14 +199,7 @@ func (e *Environment) handlers() worker.Handlers {
 			e.SetState(environment.ProcessOfflineState)
 		},
 
-		Disconnected: func(err error) {
-			e.mu.Lock()
-			e.client = nil
-			e.mu.Unlock()
-			if err != nil {
-				e.log().WithField("error", err).Debug("worker connection closed")
-			}
-		},
+		Disconnected: e.onDisconnect,
 	}
 }
 

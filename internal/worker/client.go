@@ -32,6 +32,9 @@ type Handlers struct {
 	State   func(wire.State)
 	Stats   func(wire.Stats)
 	Exit    func(wire.Exit)
+	// Log receives the worker's own diagnostics, as distinct from Console, which
+	// is the game server's output.
+	Log func(wire.Log)
 	// Disconnected is called once when the connection drops for any reason.
 	Disconnected func(error)
 }
@@ -70,7 +73,18 @@ func SpawnWorker(ctx context.Context, exePath, instanceDir, uuid string, timeout
 	}
 	cmd.Stdin = nil
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+
+	// A detached process with no stderr discards anything written to it, which
+	// for a Go binary includes the panic traceback. That is the one message a
+	// worker can produce that nothing else will ever record: it dies before it
+	// can relay anything up the pipe, and the daemon sees only a closed
+	// connection. Point it at a file in the instance directory, appended to so
+	// that a worker restarting in a loop leaves the whole sequence behind.
+	if f, ferr := os.OpenFile(filepath.Join(instanceDir, "worker-stderr.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); ferr == nil {
+		cmd.Stderr = f
+		defer f.Close()
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("worker: spawn %s: %w", exePath, err)
@@ -232,6 +246,13 @@ func (c *Client) handle(env wire.Envelope) {
 			var p wire.Exit
 			if wire.Unmarshal(env, &p) == nil {
 				c.handlers.Exit(p)
+			}
+		}
+	case wire.TypeLog:
+		if c.handlers.Log != nil {
+			var p wire.Log
+			if wire.Unmarshal(env, &p) == nil {
+				c.handlers.Log(p)
 			}
 		}
 	}

@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -435,12 +436,23 @@ func (w *Worker) Start(p wire.Start) error {
 
 	w.setState(wire.StateStarting)
 
+	// Logged before anything is attempted, because every failure below leaves
+	// the daemon with a bare error and no record of what was being run.
+	w.Log(wire.LogInfo, "starting server process",
+		"argv", strings.Join(p.Argv, " "),
+		"dir", w.cfg.WorkingDir,
+		"account", accountOrSelf(p.Username),
+		"pseudo_console", p.PseudoConsole,
+		"env_vars", len(p.Env))
+
 	job, err := jobobject.Create()
 	if err != nil {
+		w.Log(wire.LogError, "could not create the job object", "error", err)
 		w.setState(wire.StateOffline)
 		return err
 	}
 	if err := job.SetLimits(limitsFromWire(p.Limits)); err != nil {
+		w.Log(wire.LogError, "could not apply job object limits", "error", err)
 		_ = job.Close()
 		w.setState(wire.StateOffline)
 		return err
@@ -459,6 +471,8 @@ func (w *Worker) Start(p wire.Start) error {
 	if p.Username != "" {
 		token, err = winproc.LogonUser(p.Username, p.Password)
 		if err != nil {
+			w.Log(wire.LogError, "could not log on the server's account",
+				"account", p.Username, "error", err)
 			_ = job.Close()
 			w.setState(wire.StateOffline)
 			return err
@@ -468,6 +482,8 @@ func (w *Worker) Start(p wire.Start) error {
 
 	proc, err := winproc.Start(cfg, job)
 	if err != nil {
+		w.Log(wire.LogError, "could not start the server process",
+			"executable", p.Argv[0], "error", err)
 		if token != 0 {
 			_ = token.Close()
 		}
@@ -489,6 +505,7 @@ func (w *Worker) Start(p wire.Start) error {
 	w.stopping = false
 	w.mu.Unlock()
 
+	w.Log(wire.LogInfo, "server process started", "pid", proc.Pid)
 	w.setState(wire.StateRunning)
 
 	go w.pumpConsole(proc)

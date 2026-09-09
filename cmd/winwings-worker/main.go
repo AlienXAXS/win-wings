@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 
 	"github.com/pterodactyl/wings/internal/winproc"
+	"github.com/pterodactyl/wings/internal/wire"
 	"github.com/pterodactyl/wings/internal/worker"
 )
 
@@ -46,14 +47,22 @@ func main() {
 		cfg.LogPath = filepath.Join(instanceDir, "console.log")
 	}
 
-	// The worker launches the game server under its own account, which is where
-	// a desktop grant can fail. It has no logger, so warnings go to stderr,
-	// which the daemon captures.
-	winproc.Warn = func(msg string) {
-		fmt.Fprintln(os.Stderr, "winwings-worker: "+msg)
-	}
+	// Diagnostics land beside worker.json rather than in the server's data
+	// directory: the server must not be able to rewrite the record of what its
+	// own worker did.
+	worker.SetDiagnosticLog(filepath.Join(instanceDir, "worker.log"))
 
 	w := worker.New(*cfg)
+
+	// The worker launches the game server under its own account, which is where
+	// a desktop grant can fail. Relayed up the control pipe and written to the
+	// worker's log, because its stderr goes to a file nobody thinks to look in.
+	winproc.Warn = func(msg string) {
+		w.Log(wire.LogWarn, msg)
+	}
+
+	w.Log(wire.LogInfo, "worker starting",
+		"uuid", cfg.UUID, "pid", os.Getpid(), "instance", instanceDir)
 
 	if err := w.Serve(); err != nil {
 		fmt.Fprintf(os.Stderr, "winwings-worker: %v\n", err)
