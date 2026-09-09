@@ -49,6 +49,7 @@ type collector struct {
 	states  []wire.ProcessState
 	exits   []wire.Exit
 	stats   []wire.Stats
+	logs    []wire.Log
 }
 
 func (c *collector) handlers() Handlers {
@@ -73,7 +74,30 @@ func (c *collector) handlers() Handlers {
 			c.stats = append(c.stats, p)
 			c.mu.Unlock()
 		},
+		Log: func(p wire.Log) {
+			c.mu.Lock()
+			c.logs = append(c.logs, p)
+			c.mu.Unlock()
+		},
 	}
+}
+
+// logText renders the worker's own diagnostics the way an operator reading the
+// wings log sees them, so a test can assert on what was actually reported.
+func (c *collector) logText() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var b strings.Builder
+	for _, l := range c.logs {
+		b.WriteString(string(l.Level))
+		b.WriteString(" ")
+		b.WriteString(l.Message)
+		for k, v := range l.Fields {
+			b.WriteString(" " + k + "=" + v)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func (c *collector) consoleText() string {
@@ -378,4 +402,70 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// TestStopEscalationIsLogged drives a process that ignores its stop command all
+// the way down to the kill, and asserts the worker narrated each step. Without
+// this the only evidence of how a stop went is that the process is gone.
+func TestStopEscalationIsLogged(t *testing.T) {
+	c, col, _ := startWorker(t, "stop-logging-test")
+
+	// ping ignores its stdin entirely, so the stop command is delivered and
+	// has no effect -- exactly the case that has to escalate. (pause is no
+	// good here: any keystroke, including a stop command, ends it.)
+	if err := c.Start(wire.Start{
+		Argv:   []string{comspec(), "/c", "ping", "-n", "600", "127.0.0.1"},
+		Env:    os.Environ(),
+		Limits: wire.Limits{ProcessLimit: 32, MemoryBytes: 512 << 20},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitFor(t, 10*time.Second, "console output", func() bool {
+		return len(col.consoleText()) > 0
+	})
+
+	if err := c.Stop(wire.Stop{
+		Mode:           wire.StopCommand,
+		Value:          "this-is-not-a-stop-command",
+		TimeoutSeconds: 2,
+	}); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	waitFor(t, 30*time.Second, "exit event", func() bool {
+		return col.exitCount() > 0
+	})
+
+	logs := col.logText()
+	t.Logf("worker diagnostics:\n%s", logs)
+
+	for _, want := range []string{
+		"stopping the server process",
+		"mode=command",
+		"command=this-is-not-a-stop-command",
+		"timeout=2s",
+		"writing the stop command to the process's stdin",
+		"the process is still running; escalating",
+		"sending ctrl+break to the process group",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("stop diagnostics never mentioned %q", want)
+		}
+	}
+
+	// Whether ctrl+break reaches a detached process depends on the console it
+	// was given, so either outcome is legitimate here. What matters is that the
+	// log says which one happened rather than leaving it to be inferred.
+	if !strings.Contains(logs, "killing the job object") &&
+		!strings.Contains(logs, "the process exited after=ctrl+break") &&
+		!strings.Contains(logs, "after=ctrl+break") {
+		t.Error("stop diagnostics never reported how the process finally went away")
+	}
+
+	// The elapsed time is the number an operator needs to tell "it hung" from
+	// "the egg's timeout is too short", so it must actually be reported.
+	if !strings.Contains(logs, "elapsed=") {
+		t.Error("stop diagnostics never reported how long the stop took")
+	}
 }

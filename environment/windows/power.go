@@ -464,6 +464,16 @@ func (e *Environment) Stop(ctx context.Context) error {
 		msg.Mode = wire.StopTerminate
 	}
 
+	// The stop configuration is one of the things the egg's Windows profile can
+	// override, so record what was actually resolved rather than leaving the
+	// operator to guess whether the profile took effect.
+	e.log().WithFields(log.Fields{
+		"panel_type": stop.Type,
+		"mode":       msg.Mode,
+		"command":    msg.Value,
+		"timeout":    msg.TimeoutSeconds,
+	}).Debug("asking the worker to stop the server")
+
 	return c.Stop(msg)
 }
 
@@ -484,16 +494,26 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
+	started := time.Now()
+	e.log().WithFields(log.Fields{"deadline": duration.String(), "kill_after": terminate}).
+		Debug("waiting for the server to stop")
+
 	for {
 		select {
 		case <-tctx.Done():
 			if terminate {
+				e.log().WithField("waited", duration.String()).
+					Warn("the server did not stop within the deadline; killing it")
 				return e.Terminate(ctx, "SIGKILL")
 			}
+			e.log().WithField("waited", duration.String()).
+				Warn("the server did not stop within the deadline")
 			return tctx.Err()
 
 		case <-ticker.C:
 			if e.State() == environment.ProcessOfflineState {
+				e.log().WithField("elapsed", time.Since(started).Round(100*time.Millisecond).String()).
+					Debug("the server stopped")
 				return nil
 			}
 		}

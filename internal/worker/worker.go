@@ -753,46 +753,106 @@ func (w *Worker) UpdateLimits(l wire.Limits) error {
 // mechanism most game servers actually implement; CTRL_BREAK reaches everything
 // sharing the console and is widely unhandled; terminating the job is immediate
 // and unclean. Each step is given the full timeout before the next is tried.
+//
+// Every step is logged. A stop that goes wrong is close to impossible to
+// diagnose after the fact — the process is gone either way — so the log has to
+// say which mechanisms were tried, what each one did, and how long the process
+// was given before the next was reached for.
 func (w *Worker) Stop(p wire.Stop) {
 	defer w.guard("stopping the server process", nil)
+
+	started := time.Now()
 
 	w.mu.Lock()
 	proc := w.proc
 	if proc == nil {
 		w.mu.Unlock()
+		w.Log(wire.LogInfo, "stop requested but no process is running; nothing to do",
+			"mode", string(p.Mode))
 		return
 	}
+	pid := proc.Pid
 	w.stopping = true
 	w.mu.Unlock()
-
-	w.setState(wire.StateStopping)
 
 	timeout := time.Duration(p.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Second
+		w.Log(wire.LogDebug, "no stop timeout was supplied; using the worker's default",
+			"timeout", timeout.String())
 	}
+
+	w.Log(wire.LogInfo, "stopping the server process",
+		"mode", string(p.Mode), "command", p.Value, "timeout", timeout.String(), "pid", pid)
+
+	w.setState(wire.StateStopping)
 
 	switch p.Mode {
 	case wire.StopCommand:
-		if p.Value != "" {
-			_ = w.WriteStdin([]byte(p.Value + "\r\n"))
-			if w.waitForExit(timeout) {
+		if p.Value == "" {
+			w.Log(wire.LogWarn, "the stop mode is a console command but no command was supplied; "+
+				"escalating straight to ctrl+break")
+		} else {
+			w.Log(wire.LogInfo, "writing the stop command to the process's stdin",
+				"command", p.Value)
+			if err := w.WriteStdin([]byte(p.Value + "\r\n")); err != nil {
+				w.Log(wire.LogWarn, "could not write the stop command to stdin",
+					"command", p.Value, "error", err.Error())
+			} else if w.awaitExit("the stop command", timeout, started) {
 				return
 			}
 		}
 		fallthrough
 
 	case wire.StopCtrlBreak:
-		if err := proc.CtrlBreak(); err == nil {
-			if w.waitForExit(timeout) {
-				return
-			}
+		w.Log(wire.LogInfo, "sending ctrl+break to the process group", "pid", pid)
+		if err := proc.CtrlBreak(); err != nil {
+			w.Log(wire.LogWarn, "could not send ctrl+break to the process group",
+				"pid", pid, "error", err.Error())
+		} else if w.awaitExit("ctrl+break", timeout, started) {
+			return
 		}
 		fallthrough
 
 	case wire.StopTerminate:
-		_ = w.Terminate()
+		w.Log(wire.LogWarn, "the process did not stop on its own; killing the job object",
+			"pid", pid, "elapsed", elapsed(started))
+		if err := w.Terminate(); err != nil {
+			w.Log(wire.LogError, "failed to kill the job object; the process may still be running",
+				"pid", pid, "error", err.Error())
+			return
+		}
+		if w.waitForExit(5 * time.Second) {
+			w.Log(wire.LogInfo, "the process was killed", "pid", pid, "elapsed", elapsed(started))
+		} else {
+			// Terminating a job object does not fail silently, so reaching here
+			// means something is holding the process in the kernel: an
+			// unkillable state, usually a stuck driver or an I/O wait.
+			w.Log(wire.LogError, "the job object was killed but the process is still present",
+				"pid", pid, "elapsed", elapsed(started))
+		}
 	}
+}
+
+// awaitExit waits out the graceful timeout for one stop mechanism, reporting
+// whether it worked and logging either way.
+func (w *Worker) awaitExit(what string, d time.Duration, started time.Time) bool {
+	w.Log(wire.LogDebug, "waiting for the process to exit",
+		"after", what, "timeout", d.String())
+	if w.waitForExit(d) {
+		w.Log(wire.LogInfo, "the process exited",
+			"after", what, "elapsed", elapsed(started))
+		return true
+	}
+	w.Log(wire.LogWarn, "the process is still running; escalating",
+		"after", what, "waited", d.String(), "elapsed", elapsed(started))
+	return false
+}
+
+// elapsed renders the time since the stop began, rounded to something a human
+// reading a console wants to see.
+func elapsed(started time.Time) string {
+	return time.Since(started).Round(100 * time.Millisecond).String()
 }
 
 // waitForExit reports whether the process exited within d.
@@ -814,12 +874,18 @@ func (w *Worker) waitForExit(d time.Duration) bool {
 func (w *Worker) Terminate() error {
 	w.mu.Lock()
 	job := w.job
+	pid := 0
+	if w.proc != nil {
+		pid = w.proc.Pid
+	}
 	w.terminated = true
 	w.mu.Unlock()
 
 	if job == nil {
+		w.Log(wire.LogInfo, "terminate requested but no job object is held; nothing to kill")
 		return nil
 	}
+	w.Log(wire.LogWarn, "terminating the server's process tree", "pid", pid)
 	return job.Terminate(1)
 }
 
