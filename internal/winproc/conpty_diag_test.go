@@ -52,6 +52,15 @@ import (
 // that ran trials in one process, where leaked pseudo consoles from previous
 // trials contaminated later ones. Do not chase it.
 //
+// Confirmed against a real workload: with pseudo_console enabled for a UE5
+// dedicated server on Windows Server 2025, console output stopped reaching the
+// Panel entirely. That is the same output-side failure seen here, on a different
+// Windows build and a real game rather than cmd.exe, so it is not specific to
+// this development machine or to the test child. Note the difference in how it
+// presents: here the child dies in the loader with 0xC0000142, there it appears
+// to keep running and simply emits nothing. Whether those are one fault or two
+// is not established.
+//
 // Also ruled out: console handoff to Windows Terminal (no DelegationConsole or
 // DelegationTerminal values are set), and conhost being absent (one is spawned;
 // it simply never services the console -- with no child at all, nothing is ever
