@@ -691,6 +691,35 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 			}
 			return "PowerShell started, ran and exited cleanly", nil
 		})
+
+		// A logon token is not a logon session as far as the registry is
+		// concerned. Unless the account's profile has been loaded there is no
+		// HKEY_CURRENT_USER, and the first thing that notices is .NET resolving
+		// its default web proxy from the WinINET settings that live there --
+		// which fails as "Error creating the Web Proxy specified in the
+		// 'system.net/defaultProxy' configuration section", a message that names
+		// neither the registry nor the profile.
+		//
+		// Every egg that downloads anything hits this on its first request, so it
+		// is worth proving rather than discovering during an install.
+		s.run("registry and web proxy as a server account", func() (string, error) {
+			const probe = `$null = Get-Item 'HKCU:\Software' -ErrorAction Stop; ` +
+				`$null = [System.Net.WebRequest]::DefaultWebProxy; Write-Host hkcu-ok`
+			code, out, err := runAs(a.token, a.dataDir,
+				[]string{psPath, "-NoProfile", "-NonInteractive", "-Command", probe},
+				jobobject.Limits{ProcessLimit: 16})
+			if err != nil {
+				return "", err
+			}
+			if code != 0 || !strings.Contains(out, "hkcu-ok") {
+				return "", fmt.Errorf("%s could not read HKEY_CURRENT_USER or resolve a web "+
+					"proxy: exit %s, output %q. The account's profile was not loaded, so "+
+					"anything reading per-user registry settings will fail -- egg installs "+
+					"that download files, and Steam's client library lookup, among them",
+					a.user, winproc.ExplainExitCode(code), strings.TrimSpace(out))
+			}
+			return "HKCU resolves and the default web proxy can be constructed", nil
+		})
 	}
 
 	s.run("job object memory limit", func() (string, error) {

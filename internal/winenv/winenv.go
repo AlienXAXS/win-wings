@@ -99,9 +99,13 @@ func Base(p Paths) []string {
 		// The Linux eggs this port inherits set HOME to the server directory so
 		// that anything writing dotfiles — steamcmd being the usual culprit —
 		// lands somewhere the user can see and the daemon can back up. The
-		// Windows equivalent is these four, and the reasoning carries over: the
-		// server account has no loaded user profile, so without them a process
-		// asking for its profile directory gets a path it cannot write.
+		// Windows equivalent is these four, and the reasoning carries over.
+		//
+		// The account does have a real profile under C:\Users by now — see
+		// internal/winprofile — but it is loaded for its registry hive, not for
+		// its storage. Anything a server writes belongs inside the server's own
+		// directory, where it counts against the disk quota and lands in backups,
+		// so these deliberately point away from the real profile.
 		env = append(env,
 			"USERPROFILE="+p.Data,
 			"HOMEDRIVE="+filepath.VolumeName(p.Data),

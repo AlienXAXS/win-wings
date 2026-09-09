@@ -37,6 +37,28 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 }
 
+# .NET builds its default web proxy from the WinINET settings under HKCU. An
+# account whose profile has never been loaded has no HKCU, and the construction
+# fails on the first web request as:
+#
+#   Error creating the Web Proxy specified in the 'system.net/defaultProxy'
+#   configuration section
+#
+# which mentions neither the registry nor the profile, and looks for all the
+# world like a misconfigured proxy. win-wings loads the profile before launching
+# an install, so this should not arise -- but the check is two lines and turns a
+# fatal, badly-labelled failure into a warning on any host where it still does.
+#
+# Only cleared when reading it actually throws, so a host with a real proxy keeps
+# using it.
+try {
+    $null = [System.Net.WebRequest]::DefaultWebProxy
+} catch {
+    Write-Host "Default web proxy configuration is unreadable ($($_.Exception.Message))."
+    Write-Host 'Continuing with no proxy. If this host needs one, its installs will fail.'
+    try { [System.Net.WebRequest]::DefaultWebProxy = $null } catch { }
+}
+
 $SteamRoot   = $env:SERVER_DIR
 $SteamCmdDir = Join-Path $SteamRoot 'steamcmd'
 
@@ -63,6 +85,36 @@ function Write-TextFile {
     if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     [System.IO.File]::WriteAllText($Path, ($Content -replace "`r`n", "`n"),
         (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# Download a file, falling back to curl.exe.
+#
+# Invoke-WebRequest is the obvious tool and the fragile one: on Windows
+# PowerShell 5.1 it buffers the whole response in memory, and it drags in the
+# whole of .NET's proxy and configuration machinery to make one HTTP request.
+# curl.exe has shipped in System32 since Windows 10 1803, talks to WinHTTP
+# directly, and is unbothered by all of it. Trying it second means the common
+# path is unchanged and the awkward hosts still work.
+function Get-RemoteFile {
+    param([string]$Uri, [string]$OutFile, [int]$TimeoutSec = 300)
+
+    try {
+        Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
+        return
+    } catch {
+        $reason = $_.Exception.Message
+    }
+
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { throw $reason }
+
+    Write-Host "  Invoke-WebRequest failed ($reason); retrying with curl.exe"
+    # -f fails on an HTTP error rather than saving the error page as the payload,
+    # -L follows the redirects every GitHub release download starts with.
+    & $curl -fsSL --max-time $TimeoutSec -o $OutFile $Uri
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl.exe exited $LASTEXITCODE (Invoke-WebRequest had failed with: $reason)"
+    }
 }
 
 ## ---------------------------------------------------------------------------
@@ -122,7 +174,7 @@ if (-not (Test-Path $SteamCmdExe)) {
     foreach ($url in $mirrors) {
         try {
             Write-Host "Downloading SteamCMD from $url"
-            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 120
+            Get-RemoteFile -Uri $url -OutFile $archive -TimeoutSec 120
             $downloaded = $true
             break
         } catch {
@@ -386,8 +438,7 @@ function Get-LatestReleaseAsset {
 function Save-ReleaseAsset {
     param([object]$Asset, [string]$Destination)
     Write-Host "Downloading $($Asset.name)..."
-    Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Destination `
-        -UseBasicParsing -TimeoutSec 300
+    Get-RemoteFile -Uri $Asset.browser_download_url -OutFile $Destination -TimeoutSec 300
 }
 
 ## ---------------------------------------------------------------------------

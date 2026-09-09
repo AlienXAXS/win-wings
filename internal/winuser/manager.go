@@ -8,6 +8,8 @@ import (
 	"sync"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/pterodactyl/wings/internal/winprofile"
 )
 
 // maxAccountName is the SAM account name limit. Exceeding it is not truncated
@@ -193,6 +195,13 @@ func (m *Manager) Remove(uuid string) error {
 		// Failure here is not fatal: the account still goes, and a stale policy
 		// entry keyed to a SID that no longer resolves grants nothing.
 		_ = RemoveAllRights(sid)
+
+		// Must happen before the account is deleted: DeleteProfile resolves the
+		// profile's location from the SID, and once the account is gone there is
+		// nothing left to resolve. A leftover profile is not fatal either, but a
+		// host that has churned through a few hundred servers accumulates a few
+		// hundred abandoned directories under C:\Users.
+		_ = winprofile.Delete(sid)
 	}
 
 	if err := Delete(name); err != nil {
