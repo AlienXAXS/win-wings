@@ -3,6 +3,7 @@
 package winproc
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,8 +27,29 @@ func TestStartReturnsAnErrorRatherThanPanicking(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a missing executable")
 	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("error did not name the failing step: %v", err)
+	}
+}
+
+// The same, reaching CreateProcess itself rather than failing the lookup first.
+// This is the path the StarRupture start actually took.
+func TestStartFailingInsideCreateProcessReturnsAnError(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "not-really-a-program.exe")
+	if err := os.WriteFile(exe, []byte("this is not a PE image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Start(Config{Argv: []string{exe}, Dir: dir}, nil)
+	if err == nil {
+		t.Fatal("expected an error for a file that is not an executable")
+	}
 	if !strings.Contains(err.Error(), "create process") {
 		t.Fatalf("error did not name the failing step: %v", err)
+	}
+	if !strings.Contains(err.Error(), exe) {
+		t.Fatalf("error does not name the path it tried: %v", err)
 	}
 }
 

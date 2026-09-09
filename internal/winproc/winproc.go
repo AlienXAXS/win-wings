@@ -194,7 +194,16 @@ func Start(cfg Config, job *jobobject.Job) (_ *Process, err error) {
 	}
 
 	cmdline := windows.ComposeCommandLine(cfg.Argv)
-	argv0, err := windows.UTF16PtrFromString(cfg.Argv[0])
+
+	// Resolved rather than passed through: a relative lpApplicationName is
+	// resolved against this process's current directory, not the child's. See
+	// ResolveExecutable. The command line keeps argv[0] as the egg wrote it, so
+	// a process that inspects its own arguments sees what it was configured with.
+	exePath, err := ResolveExecutable(cfg.Argv[0], cfg.Dir, cfg.Env)
+	if err != nil {
+		return nil, err
+	}
+	argv0, err := windows.UTF16PtrFromString(exePath)
 	if err != nil {
 		return nil, fmt.Errorf("winproc: executable path: %w", err)
 	}
@@ -232,7 +241,7 @@ func Start(cfg Config, job *jobobject.Job) (_ *Process, err error) {
 		)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("winproc: create process %q: %w", cfg.Argv[0], err)
+		return nil, fmt.Errorf("winproc: create process %s: %w", exePath, err)
 	}
 
 	proc.Pid = int(pi.ProcessId)

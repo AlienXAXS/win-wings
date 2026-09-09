@@ -513,10 +513,20 @@ func (w *Worker) start(p wire.Start) error {
 	// it. Saying where argv[0] actually points separates "the startup command is
 	// wrong" from "the startup command is right and the file is missing", which
 	// are otherwise the same CreateProcess error.
+	//
+	// This asks the same function that Start will use, deliberately. A diagnostic
+	// with its own idea of where the executable is can report a file that exists
+	// while CreateProcess looks somewhere else entirely, which is precisely how
+	// this lookup bug survived being logged.
 	if len(p.Argv) > 0 {
-		resolved, note := locateExecutable(p.Argv[0], w.cfg.WorkingDir, p.Env)
-		w.Log(wire.LogDebug, "resolved the startup executable",
-			"argv0", p.Argv[0], "resolved", resolved, "how", note)
+		resolved, rerr := winproc.ResolveExecutable(p.Argv[0], w.cfg.WorkingDir, p.Env)
+		if rerr != nil {
+			w.Log(wire.LogWarn, "could not locate the startup executable",
+				"argv0", p.Argv[0], "dir", w.cfg.WorkingDir, "error", rerr)
+		} else {
+			w.Log(wire.LogDebug, "located the startup executable",
+				"argv0", p.Argv[0], "resolved", resolved)
+		}
 	}
 
 	job, err := jobobject.Create()
