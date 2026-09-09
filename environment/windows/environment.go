@@ -331,8 +331,8 @@ func (e *Environment) Destroy() error {
 	// One tree per server, so removal is a single call. The server's files, its
 	// worker configuration, its console log and any private runtime all go
 	// together.
-	if err := os.RemoveAll(e.ServerRoot()); err != nil && !os.IsNotExist(err) {
-		return errors.Wrap(err, "environment/windows: failed to remove the server directory")
+	if err := removeTree(e.ServerRoot()); err != nil {
+		return err
 	}
 
 	// The account outlives the files unless it is removed explicitly, and a node
@@ -355,6 +355,39 @@ func (e *Environment) Destroy() error {
 		}
 	}
 	return nil
+}
+
+// removeTree deletes a server's directory, retrying while something still holds
+// a handle on it.
+//
+// Windows refuses to remove a directory that any process has open, and a
+// deletion arriving moments after a server was stopped races several things that
+// are on their way out: the worker process, whose working directory is the
+// server's own data directory; whatever the server itself spawned; and the
+// virus scanner that woke up when they exited. All of them clear in well under a
+// second, so a short retry converts a spurious failure into a slight delay.
+//
+// It does not retry forever. A handle that is still held after this is held by
+// something that is not leaving, and the operator needs to be told rather than
+// have the request hang.
+func removeTree(path string) error {
+	const attempts = 10
+
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = os.RemoveAll(path); err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(time.Duration(i+1) * 100 * time.Millisecond)
+	}
+
+	return errors.Wrapf(err,
+		"environment/windows: could not remove %s after %d attempts. Something still has a "+
+			"handle open on it -- most often this server's own worker process, or a virus "+
+			"scanner. `handle64.exe %s` or Resource Monitor's Associated Handles search will "+
+			"name it; note that the daemon itself will not appear in Explorer as holding the "+
+			"directory even when it is",
+		path, attempts, path)
 }
 
 // IsRunning reports whether the supervised process is alive.

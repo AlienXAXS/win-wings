@@ -57,6 +57,7 @@ func (fs *Filesystem) Path() string {
 	return fs.winFS.BasePath()
 }
 
+
 // ReadDir reads directory entries.
 func (fs *Filesystem) ReadDir(path string) ([]winfs.DirEntry, error) {
 	return fs.winFS.ReadDir(path)
@@ -384,9 +385,13 @@ func (fs *Filesystem) TruncateRootDirectory() error {
 
 // Close releases the filesystem's sandbox handle.
 //
-// Callers that create a Filesystem for a short-lived purpose must call this.
-// Windows will not allow the server's directory to be renamed or deleted while
-// the handle is open, so leaking one blocks transfers and deletions.
+// Callers that create a Filesystem for a short-lived purpose must call this, and
+// so must the server destruction path. Windows will not allow the server's
+// directory to be renamed or deleted while the handle is open, so leaking one
+// blocks transfers and deletions -- and because the process holding it is the
+// daemon doing the deleting, nothing appears to be holding the directory at all.
+//
+// Path still works afterwards: it returns a string recorded at construction.
 func (fs *Filesystem) Close() error {
 	return fs.winFS.Close()
 }

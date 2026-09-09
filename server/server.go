@@ -113,6 +113,14 @@ func (s *Server) CleanupForDestroy() {
 	s.DestroyAllSinks()
 	s.Websockets().CancelAll()
 	s.powerLock.Destroy()
+
+	// Must happen before the environment removes the server's tree. The sandbox
+	// holds an open handle on the data directory, and Windows will not delete a
+	// directory that anything has open -- including this process.
+	if err := s.Filesystem().Close(); err != nil {
+		s.Log().WithField("error", err).
+			Warn("could not release the filesystem sandbox; removing this server's files may fail")
+	}
 }
 
 // ID returns the UUID for the server instance.
