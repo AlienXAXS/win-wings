@@ -454,14 +454,31 @@ func (e *Environment) Stop(ctx context.Context) error {
 		msg.Mode = wire.StopCommand
 		msg.Value = stop.Value
 
-	case remote.ProcessStopSignal:
-		// Signals do not exist here. CTRL_BREAK is the nearest equivalent and is
-		// widely unhandled by game servers, so it is attempted and then escalated
-		// rather than relied upon.
+	case remote.ProcessStopSignal, remote.ProcessStopNativeStop:
+		// Neither of these exists here. A POSIX signal has no Windows equivalent,
+		// and a "native stop" means `docker stop`, which is SIGTERM followed by a
+		// kill. CTRL_BREAK is the nearest thing to both; it is widely unhandled by
+		// game servers, so it is attempted and then escalated rather than relied
+		// upon.
+		//
+		// Neither is a good outcome. An egg that stops this way has no graceful
+		// path on Windows at all, and the operator wants to know that rather than
+		// discover it when a save is lost, so it is a warning and not a note.
 		msg.Mode = wire.StopCtrlBreak
+		e.log().WithField("panel_type", stop.Type).
+			Warn("this egg has no windows stop command; the server can only be asked to " +
+				"stop with ctrl+break, and will be killed if it does not. Set a stop " +
+				"command on the egg's windows profile")
 
 	default:
 		msg.Mode = wire.StopTerminate
+		if stop.Type != "" {
+			e.log().WithField("panel_type", stop.Type).
+				Warn("unrecognised stop type; the server will be killed rather than asked to stop")
+		} else {
+			e.log().Warn("this egg defines no stop method at all; the server will be killed " +
+				"rather than asked to stop. Set a stop command on the egg's windows profile")
+		}
 	}
 
 	// The stop configuration is one of the things the egg's Windows profile can

@@ -136,11 +136,15 @@ type ConsoleConfiguration struct {
 	Rows    uint16 `default:"50" json:"rows" yaml:"rows"`
 
 	// MaxSize is the maximum size in megabytes of a server's console log before
-	// it is rotated.
+	// it is rotated mid-run. A run normally gets one file of its own; this is
+	// the backstop for a server that will not stop talking.
 	MaxSize int64 `default:"5" json:"max_size" yaml:"max_size"`
 
-	// MaxFiles is the number of rotated console logs retained per server.
-	MaxFiles int `default:"1" json:"max_files" yaml:"max_files"`
+	// MaxFiles is the number of rotated console logs retained per server. Since
+	// each run starts a new file, this is roughly "how many previous runs can I
+	// still read", which is the number that matters when a server is crash
+	// looping and the useful output was two starts ago.
+	MaxFiles int `default:"3" json:"max_files" yaml:"max_files"`
 }
 
 // FirewallConfiguration controls whether the daemon opens a server's allocated

@@ -126,10 +126,39 @@ func (c *consoleBuffer) writeLog(data []byte) {
 	}
 }
 
+// Roll starts a fresh console log, retaining the previous one as history.
+//
+// Called when a server starts. A single appended file is the wrong shape for
+// this: the interesting question is almost always "what did this run print",
+// and answering it out of a file holding every run since the server was created
+// means scrolling past history that a chatty server measures in hundreds of
+// megabytes. One file per run also means a crash loop discards its own evidence
+// through the retention count rather than by growing without bound.
+func (c *consoleBuffer) Roll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.logPath == "" {
+		return
+	}
+	// Nothing written yet -- a first start, or a worker that has just been
+	// spawned -- so there is no history worth keeping a generation of.
+	if c.log == nil {
+		if st, err := os.Stat(c.logPath); err != nil || st.Size() == 0 {
+			return
+		}
+	} else if c.logSize == 0 {
+		return
+	}
+	c.rotate()
+}
+
 // rotate closes the current log and shifts the retained history. Caller must
 // hold the lock.
 func (c *consoleBuffer) rotate() {
-	_ = c.log.Close()
+	if c.log != nil {
+		_ = c.log.Close()
+	}
 	c.log = nil
 	c.logSize = 0
 

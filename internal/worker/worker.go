@@ -500,6 +500,11 @@ func (w *Worker) start(p wire.Start) error {
 
 	w.setState(wire.StateStarting)
 
+	// A run gets its own console log. Done before the process is launched so
+	// that the file holds this run and nothing else, including the diagnostics
+	// below if the launch fails.
+	w.console.Roll()
+
 	// Logged before anything is attempted, because every failure below leaves
 	// the daemon with a bare error and no record of what was being run.
 	w.Log(wire.LogInfo, "starting server process",
@@ -807,8 +812,13 @@ func (w *Worker) Stop(p wire.Stop) {
 	case wire.StopCtrlBreak:
 		w.Log(wire.LogInfo, "sending ctrl+break to the process group", "pid", pid)
 		if err := proc.CtrlBreak(); err != nil {
-			w.Log(wire.LogWarn, "could not send ctrl+break to the process group",
-				"pid", pid, "error", err.Error())
+			// Nothing was delivered, so waiting out the timeout would achieve
+			// nothing but delay the kill. Say plainly that no graceful mechanism
+			// remains, because the next line is the server being killed and the
+			// operator will read that as the daemon being trigger-happy.
+			w.Log(wire.LogWarn, "could not send ctrl+break to the process group; no graceful "+
+				"stop is available for this server. Give its egg a stop command in the "+
+				"windows profile", "pid", pid, "error", err.Error())
 		} else if w.awaitExit("ctrl+break", timeout, started) {
 			return
 		}
