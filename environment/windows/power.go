@@ -219,16 +219,20 @@ func (e *Environment) Start(ctx context.Context) error {
 
 	e.SetState(environment.ProcessStartingState)
 
-	envVars := e.Config().EnvironmentVariables()
+	e.mu.RLock()
+	pty, runtimeName := e.meta.PseudoConsole, e.meta.Runtime
+	e.mu.RUnlock()
+
+	// Put the egg's runtime ahead of the host PATH so that a startup line saying
+	// "java" gets the version this egg asked for rather than whichever JRE was
+	// installed most recently.
+	envVars := config.Get().Runtime.ApplyRuntime(runtimeName, e.Config().EnvironmentVariables())
+
 	argv, err := e.resolveStartup(envVars)
 	if err != nil {
 		sawError = true
 		return err
 	}
-
-	e.mu.RLock()
-	pty := e.meta.PseudoConsole
-	e.mu.RUnlock()
 
 	console := config.Get().Runtime.Console
 	username, password := e.account()

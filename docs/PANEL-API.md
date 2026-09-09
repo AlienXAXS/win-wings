@@ -80,13 +80,45 @@ plugin outage cannot stop a node from booting servers it already knows about.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `runtime` | string | What must be present on the host — `jdk-21`, `dotnet-8`, or `""` for a self-contained binary. Replaces the container image. Passed to install scripts as `INSTALL_RUNTIME`. Empty falls back to the egg's `container_image`. |
+| `runtime` | string | Which runtime this egg needs — see below. Empty falls back to the egg's `container_image`. |
 | `startup` | string | Windows startup command. Empty uses the Panel's standard startup value. Supports `{{VAR}}` and `${VAR}`. |
 | `stop.type` | string | `command` or `signal`. |
 | `stop.value` | string | For `command`, the text written to stdin (`stop`, `end`, `quit`). |
 | `pseudo_console` | bool | Allocate a ConPTY rather than pipes. Only for processes that detect a non-console stdout — steamcmd being the usual case. |
 
 Omitting `stop` entirely uses the egg's standard stop configuration.
+
+#### Runtime names
+
+`runtime` is the Windows counterpart to an egg's container image, and it is
+resolved rather than merely passed through. The node's `config.yml` maps names to
+directories:
+
+```yaml
+runtime:
+  runtimes:
+    java-8:  'C:\Program Files\Eclipse Adoptium\jre-8.0.504.1-hotspot'
+    java-17: 'C:\Program Files\Eclipse Adoptium\jre-17.0.20.101-hotspot'
+    java-21: 'C:\Program Files\Eclipse Adoptium\jre-21.0.12.101-hotspot'
+```
+
+When a server starts, the matching `bin` directory is **prepended to its PATH**
+and exported as `RUNTIME_PATH`, for both the server process and its install
+script. A startup command saying `java` therefore gets the version the egg asked
+for, not whichever JRE was installed last. This is necessary because several Java
+versions coexist on one host, where a Linux node would have used a different
+container image per egg.
+
+The names are a convention between the plugin and the node operator, not
+something the daemon defines. `java-8`, `java-11`, `java-17`, `java-21`,
+`dotnet-8` are what `scripts/provision-host.ps1` emits. A name the node does not
+recognise is not an error — the server simply inherits the host PATH, which is
+correct for eggs needing no runtime.
+
+Matching is case-insensitive.
+
+The plugin should offer this as a dropdown rather than free text, since a typo
+silently produces a server that inherits the wrong Java.
 
 ### `GET /api/remote/windows/servers/{uuid}/install`
 

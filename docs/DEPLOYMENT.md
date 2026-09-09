@@ -9,7 +9,9 @@ any egg can be installed.
 
 ## Requirements
 
-- Windows 10 1809 / Server 2019 or newer (ConPTY and `os.Root` both need it)
+- Windows Server 2019 / Windows 10 1809 or newer. Server 2025 with **Desktop
+  Experience** is the tested target; Server Core is not recommended, as several
+  game servers link against GDI and user32 even when headless.
 - PowerShell 5.1 (built in) — PowerShell 7 is used in preference if installed
 - A Pterodactyl-compatible Panel with the win-wings Blueprint plugin
 
@@ -18,11 +20,44 @@ any egg can be installed.
 Both binaries must be deployed **in the same directory**. The daemon spawns the
 worker from alongside itself and refuses to start if it is missing.
 
-```bash
-make release
+```powershell
+.uild.ps1 -Release
 ```
 
-Produces `build/wings.exe` and `build/winwings-worker.exe`.
+Produces `build\wings.exe` and `build\winwings-worker.exe`. (`make release`
+works too if you have make, which Windows does not by default.)
+
+## 0. Provision the host
+
+Installs the runtimes and native dependencies game servers need, and applies the
+Defender and performance settings that matter for this workload.
+
+```powershell
+# Elevated
+.\scripts\provision-host.ps1
+```
+
+It installs Visual C++ redistributables (2008 through 2022, x86 and x64), Temurin
+JREs 8/11/17/21, .NET 6 and 8 desktop runtimes, 7-Zip, Git, SteamCMD, Node, Python
+and PowerShell 7 — then prints the `runtime.runtimes` block to paste into your
+config.
+
+Two things worth knowing about what it does:
+
+- **Visual C++ redistributables are the most common cause of a native server
+  refusing to start.** Source engine games need the *x86* 2013 runtime even on a
+  64-bit host. They are small; the script installs every generation rather than
+  leaving you to diagnose a missing DLL.
+- **Defender exclusions are scoped to the server data tree only.** Real-time
+  scanning of a world directory under continuous write is a large throughput
+  cost, and Defender periodically quarantines legitimate server binaries as false
+  positives. The rest of the host stays protected.
+
+Use **Desktop Experience**, not Server Core. A number of game servers link
+against GDI and user32 even when running headless.
+
+Pass `-Java 17,21` to install fewer JVM versions, or `-SkipDefender` to manage
+exclusions yourself.
 
 ## 1. Create the directory layout
 
@@ -98,7 +133,11 @@ configure command knows nothing about Windows accounts.
 
 Set `system.timezone` to an IANA name (`Europe/London`, not `GMT Standard Time`).
 Windows and IANA name zones differently and Go ships no mapping, so an unset
-value falls back to UTC with a warning.
+value falls back to UTC with a warning. The daemon embeds the IANA database, so
+any valid zone name works despite Windows not shipping one.
+
+Paste in the `runtime.runtimes` block that step 0 printed. Without it, an egg
+asking for `java-21` gets whichever JRE happens to be first on the host PATH.
 
 ## 5. Install the service
 

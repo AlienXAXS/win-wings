@@ -300,7 +300,10 @@ func (ip *InstallationProcess) installEnvironment() []string {
 	// It is also the script's working directory, so a script can use either.
 	env = append(env, "SERVER_DIR="+ip.Server.Filesystem().Path())
 	env = append(env, "INSTALL_RUNTIME="+ip.Script.ContainerImage)
-	return env
+
+	// Put the requested runtime ahead of the host PATH, and export RUNTIME_PATH,
+	// so an install script can invoke the right java without hardcoding a path.
+	return config.Get().Runtime.ApplyRuntime(ip.Script.ContainerImage, env)
 }
 
 // resourceLimits bounds the install process.

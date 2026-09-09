@@ -1,7 +1,10 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // RuntimeConfiguration defines how the daemon runs server processes on the
@@ -60,6 +63,22 @@ type RuntimeConfiguration struct {
 
 	// Console configures capture of server stdout/stderr by the worker process.
 	Console ConsoleConfiguration `json:"console" yaml:"console"`
+
+	// Runtimes maps the runtime names eggs ask for onto directories on this host.
+	//
+	// An egg's Windows profile names what it needs — "jdk-21", "dotnet-8" — in
+	// the same way a Linux egg names a container image. Unlike an image, a name
+	// alone is not enough here: several Java versions coexist on one host and a
+	// bare `java` on PATH resolves to whichever installer ran last.
+	//
+	// Each entry's `bin` directory is prepended to the PATH of that server's
+	// process and its install script, and exported as RUNTIME_PATH. An egg can
+	// then invoke `java` and get the right one, or use {{RUNTIME_PATH}}\java.exe
+	// explicitly.
+	//
+	// A server whose runtime is not listed here still starts; it simply inherits
+	// the host PATH, which is correct for eggs that need no runtime at all.
+	Runtimes map[string]string `json:"runtimes" yaml:"runtimes"`
 
 	// RequireWindowsProfile refuses to run any server whose egg has no Windows
 	// profile published by the Panel's win-wings plugin.
@@ -235,4 +254,60 @@ func (o Overhead) GetMultiplier(memoryLimit int64) float64 {
 	}
 
 	return o.DefaultMultiplier
+}
+
+// RuntimePath resolves a runtime name to its directory on this host.
+//
+// Returns an empty string when the name is unknown or unset, which means the
+// server inherits the host PATH unchanged.
+func (r RuntimeConfiguration) RuntimePath(name string) string {
+	if name == "" || len(r.Runtimes) == 0 {
+		return ""
+	}
+	if p, ok := r.Runtimes[name]; ok {
+		return p
+	}
+	// Egg authors and operators will not always agree on capitalisation.
+	for k, v := range r.Runtimes {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
+}
+
+// ApplyRuntime prepends a runtime's bin directory to the PATH entry of env and
+// exports RUNTIME_PATH, returning the adjusted environment.
+//
+// Prepending rather than replacing matters: an install script may still need
+// tools from the host PATH, and a runtime that shadows them would break it.
+func (r RuntimeConfiguration) ApplyRuntime(name string, env []string) []string {
+	dir := r.RuntimePath(name)
+	if dir == "" {
+		return env
+	}
+
+	bin := filepath.Join(dir, "bin")
+	if _, err := os.Stat(bin); err != nil {
+		// Some runtimes are laid out without a bin subdirectory.
+		bin = dir
+	}
+
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, e := range env {
+		// Windows environment variables are case-insensitive, and the inherited
+		// block may spell it "Path".
+		if k, v, ok := strings.Cut(e, "="); ok && strings.EqualFold(k, "PATH") {
+			out = append(out, k+"="+bin+string(os.PathListSeparator)+v)
+			replaced = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !replaced {
+		out = append(out, "PATH="+bin)
+	}
+
+	return append(out, "RUNTIME_PATH="+bin)
 }
