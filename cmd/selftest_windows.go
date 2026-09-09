@@ -742,25 +742,13 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 		// A process that died in the loader also exits non-zero, and accepting
 		// that would report a working memory limit on a host where nothing runs
 		// at all. This check passed for exactly that reason once already.
-		if isLoaderFailure(code) {
+		if winproc.IsLoaderFailure(code) {
 			return "", fmt.Errorf("PowerShell failed to start rather than failing to "+
 				"allocate: %s. The memory limit was not exercised",
 				winproc.ExplainExitCode(code))
 		}
 		return "a 256MB allocation was refused inside a 64MB job", nil
 	})
-}
-
-// isLoaderFailure reports whether an exit code means the process never ran.
-//
-// Any check that expects a process to fail has to distinguish the failure it
-// asked for from the process not starting, or it passes on a broken host.
-func isLoaderFailure(code uint32) bool {
-	switch code {
-	case 0xC0000142, 0xC0000135, 0xC0000139, 0xC000007B:
-		return true
-	}
-	return false
 }
 
 // runAs launches a command as another account inside a Job Object and returns

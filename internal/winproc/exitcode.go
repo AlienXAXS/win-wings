@@ -30,6 +30,20 @@ func ExplainExitCode(code uint32) string {
 	return fmt.Sprintf("%d", code)
 }
 
+// IsLoaderFailure reports whether an exit code means the process never ran.
+//
+// Any check that expects a process to fail has to distinguish the failure it
+// asked for from the process not starting, or it passes on a broken host. The
+// codes here are exactly the ones ExplainExitCode describes as the loader giving
+// up before the program's first instruction.
+func IsLoaderFailure(code uint32) bool {
+	switch code {
+	case 0xC0000142, 0xC0000135, 0xC0000139, 0xC000007B:
+		return true
+	}
+	return false
+}
+
 // ntStatusHints covers the codes actually seen when launching a process under
 // another account, each with the cause worth checking first rather than a
 // transcription of the NTSTATUS name.

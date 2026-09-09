@@ -111,21 +111,24 @@ type ConsoleConfiguration struct {
 
 	// InstallPseudoConsole allocates a ConPTY for installation scripts.
 	//
-	// On by default, which is the opposite of the setting above, because an
-	// install and a running server want opposite things. A server's console is
-	// read for a long time by software, and clean lines are worth more than
-	// liveness. An install is watched by a person for a couple of minutes and
-	// then thrown away, and liveness is the entire point.
+	// What it buys: handed a plain pipe, the C runtime that steamcmd and most
+	// other installers are built on switches stdout from line buffering to full
+	// buffering. The output is not lost, but it arrives in 4KB blocks, so a
+	// twenty-minute download shows an empty console and then everything at once
+	// — exactly when somebody is watching to see whether it is progressing.
 	//
-	// Handed a plain pipe, the C runtime that steamcmd and most other installers
-	// are built on switches stdout from line buffering to full buffering. The
-	// output is not lost, it just arrives in 4KB blocks — which for a download
-	// that takes twenty minutes means an empty console and then everything at
-	// once, exactly when somebody is watching to see whether it is progressing.
+	// Off by default anyway, because ConPTY is not yet dependable here. On some
+	// hosts a child attached to a pseudo console dies in the loader with
+	// 0xC0000142 having run nothing, and the same host launches it perfectly
+	// well on plain pipes; reproduced on a development machine where the
+	// identical call succeeds in isolation and fails in company, which is not a
+	// property to hand a default to. Turning this on trades buffered output for
+	// that risk, and the symptom is unmistakable: the install fails immediately
+	// with 0xC0000142 rather than running at all.
 	//
-	// Turn it off if an egg's installer produces unreadable output through a
-	// ConPTY; allocation failing is handled without it, by falling back to pipes.
-	InstallPseudoConsole bool `default:"true" json:"install_pseudo_console" yaml:"install_pseudo_console"`
+	// A ConPTY that cannot be allocated at all is handled separately, by falling
+	// back to pipes. That is the benign case; this setting is about the other one.
+	InstallPseudoConsole bool `default:"false" json:"install_pseudo_console" yaml:"install_pseudo_console"`
 
 	// Columns and Rows size the pseudo console when one is allocated. Some
 	// processes wrap or truncate output to the reported width.

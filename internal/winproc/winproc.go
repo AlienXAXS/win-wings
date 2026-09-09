@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -73,7 +74,10 @@ type Process struct {
 
 	proc   windows.Handle
 	thread windows.Handle
-	pty    windows.Handle
+
+	// ptyMu guards pty, which Wait and Close both release.
+	ptyMu sync.Mutex
+	pty   windows.Handle
 
 	stdin  *os.File
 	output *os.File
@@ -351,7 +355,21 @@ func (p *Process) Stdin() io.WriteCloser { return p.stdin }
 func (p *Process) Output() io.ReadCloser { return p.output }
 
 // Wait blocks until the process exits and returns its exit code.
+//
+// Releasing the pseudo console is part of waiting, not part of closing. A plain
+// pipe reports EOF when the child exits because the only remaining write handle
+// went with it; a pseudo console does not, because the console itself holds that
+// handle and keeps it until ClosePseudoConsole. A caller that waits for the
+// process and then drains its output to EOF -- which is what both the installer
+// and the worker do -- would otherwise block forever, with the deferred Close
+// that would have released it sitting behind the drain it is waiting on.
+//
+// Closed here rather than in Close for that reason, and while a reader is still
+// attached: ClosePseudoConsole flushes what the console has buffered before it
+// closes the pipe, so the output arrives and then EOF does.
 func (p *Process) Wait() (uint32, error) {
+	defer p.closeConsole()
+
 	if _, err := windows.WaitForSingleObject(p.proc, windows.INFINITE); err != nil {
 		return 0, fmt.Errorf("winproc: wait: %w", err)
 	}
@@ -360,6 +378,29 @@ func (p *Process) Wait() (uint32, error) {
 		return 0, fmt.Errorf("winproc: exit code: %w", err)
 	}
 	return code, nil
+}
+
+// console returns the pseudo console handle, or zero once it has been released.
+func (p *Process) console() windows.Handle {
+	p.ptyMu.Lock()
+	defer p.ptyMu.Unlock()
+	return p.pty
+}
+
+// closeConsole releases the pseudo console, if there is one, exactly once.
+//
+// Wait and Close can race -- a caller terminating a server calls Close while
+// another goroutine sits in Wait -- and ClosePseudoConsole must not be handed a
+// handle that has already gone.
+func (p *Process) closeConsole() {
+	p.ptyMu.Lock()
+	pty := p.pty
+	p.pty = 0
+	p.ptyMu.Unlock()
+
+	if pty != 0 {
+		windows.ClosePseudoConsole(pty)
+	}
 }
 
 // CtrlBreak sends CTRL_BREAK_EVENT to the process group.
@@ -371,7 +412,7 @@ func (p *Process) Wait() (uint32, error) {
 // kill. Treat it as a fallback between a stdin stop command and terminating the
 // job, never as the primary path.
 func (p *Process) CtrlBreak() error {
-	if p.pty != 0 {
+	if p.console() != 0 {
 		return fmt.Errorf("winproc: ctrl-break unavailable in pseudo console mode")
 	}
 	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(p.Pid)); err != nil {
@@ -382,10 +423,11 @@ func (p *Process) CtrlBreak() error {
 
 // Resize changes the pseudo console dimensions. No-op without one.
 func (p *Process) Resize(cols, rows uint16) error {
-	if p.pty == 0 {
+	pty := p.console()
+	if pty == 0 {
 		return nil
 	}
-	if err := windows.ResizePseudoConsole(p.pty, windows.Coord{X: int16(cols), Y: int16(rows)}); err != nil {
+	if err := windows.ResizePseudoConsole(pty, windows.Coord{X: int16(cols), Y: int16(rows)}); err != nil {
 		return fmt.Errorf("winproc: resize pseudo console: %w", err)
 	}
 	return nil
@@ -417,12 +459,11 @@ func (p *Process) closeAll() {
 		_ = p.output.Close()
 		p.output = nil
 	}
-	// The pseudo console must be closed after its pipes, or ClosePseudoConsole
-	// blocks waiting to flush into a reader that no longer exists.
-	if p.pty != 0 {
-		windows.ClosePseudoConsole(p.pty)
-		p.pty = 0
-	}
+	// Ordinarily already released by Wait. This covers the process that is
+	// closed without ever being waited on -- a failed start, mainly. After the
+	// pipes, because with no reader left ClosePseudoConsole would otherwise
+	// block trying to flush into one.
+	p.closeConsole()
 	if p.thread != 0 {
 		_ = windows.CloseHandle(p.thread)
 		p.thread = 0

@@ -354,9 +354,10 @@ profile. Note that ConPTY is currently unverified; see
 
 **Install output arrives all at once at the end** — the installer's C runtime
 switches stdout from line to full buffering when it is not a console, so the
-output is not lost, just delivered in blocks. Installs get a ConPTY by default
-(`console.install_pseudo_console`); if that has been turned off, or allocation
-failed, the log records the fallback.
+output is not lost, just delivered in blocks. Setting
+`console.install_pseudo_console` gives live output instead, at the cost of
+ConPTY, which is not yet dependable: on some hosts the child dies in the loader
+with `0xC0000142` having run nothing. It is off by default for that reason.
 
 **Server starts but ignores its port** — expected. Nothing enforces the
 allocation; the egg's startup command must pass `{{SERVER_IP}}` and
