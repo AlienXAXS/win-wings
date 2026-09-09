@@ -321,9 +321,17 @@ func runSelfTest(keep bool) error {
 		s.skip("account lifecycle", "no data directory")
 	} else {
 		if iso := config.Get().System.Account.Isolation; iso != "managed" {
-			s.warn("isolation mode",
-				fmt.Sprintf("configured as %q; these checks exercise managed isolation, which "+
-					"is what the daemon will not be using", iso))
+			detail := fmt.Sprintf("configured as %q, so the checks below exercise managed "+
+				"isolation, which is not what the daemon will use", iso)
+			// Worth being specific rather than merely noting the mismatch: this
+			// combination does not start. The privilege rules differ per mode,
+			// and an administrative daemon is refused under pool and shared.
+			if state.IsAdmin || state.IsElevated || state.IsSystem {
+				detail += fmt.Sprintf("\nthe daemon will REFUSE TO START: %q isolation does "+
+					"not permit running as %s.", iso, state.Account) +
+					"\nset system.account.isolation to \"managed\" in the config."
+			}
+			s.warn("isolation mode", detail)
 		}
 		runIsolationChecks(s, root, keep)
 	}
@@ -484,7 +492,13 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 	a, b := &servers[0], &servers[1]
 
 	s.run("run a process as a server account", func() (string, error) {
-		code, out, err := runAs(a.token, a.dataDir, []string{comspec(), "/c", "echo %USERNAME%"},
+		// whoami reads the process token rather than the environment, which is
+		// the only answer worth having here. Asking cmd.exe to echo %USERNAME%
+		// would either report whatever the daemon put in the environment block —
+		// making the check circular — or, since the block it is given is
+		// deliberately minimal, echo the variable name back unexpanded.
+		whoami := filepath.Join(os.Getenv("SystemRoot"), "System32", "whoami.exe")
+		code, out, err := runAs(a.token, a.dataDir, []string{whoami},
 			jobobject.Limits{ProcessLimit: 16})
 		if err != nil {
 			return "", err
@@ -492,6 +506,10 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 		got := strings.TrimSpace(out)
 		if code != 0 {
 			return "", fmt.Errorf("exit code %d, output %q", code, got)
+		}
+		// whoami reports HOST\account.
+		if _, after, ok := strings.Cut(got, `\`); ok {
+			got = after
 		}
 		if !strings.EqualFold(got, a.user) {
 			return "", fmt.Errorf("the process reported its account as %q, want %q", got, a.user)
