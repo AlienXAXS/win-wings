@@ -150,6 +150,19 @@ type AccountConfiguration struct {
 
 	// Shared names the account used when Isolation is "shared".
 	Shared string `default:"" json:"shared" yaml:"shared"`
+
+	// AllowElevated permits the daemon to run as LocalSystem, as a member of the
+	// Administrators group, or with an elevated token.
+	//
+	// Off by default, and the daemon refuses to start in that state. It executes
+	// egg install scripts and supervises game servers, both of which are
+	// third-party code; a compromise of either should not yield the host.
+	//
+	// The correct deployment is a dedicated unprivileged account granted only
+	// SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege, which is the
+	// minimum needed to launch servers under their own accounts. See
+	// docs/DEPLOYMENT.md.
+	AllowElevated bool `default:"false" json:"allow_elevated" yaml:"allow_elevated"`
 }
 
 // For returns the local account credentials a given server should run under.

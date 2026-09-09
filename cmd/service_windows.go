@@ -3,9 +3,11 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -108,6 +110,30 @@ var serviceInstallCommand = &cobra.Command{
 
 		account, _ := cmd.Flags().GetString("account")
 		password, _ := cmd.Flags().GetString("password")
+		allowSystem, _ := cmd.Flags().GetBool("allow-system")
+
+		// An empty ServiceStartName means LocalSystem. The daemon refuses to run
+		// that way by default, so installing it that way would produce a service
+		// that fails at startup with a message the operator only sees in the log.
+		// Refuse here instead, where they are already at a prompt.
+		if account == "" && !allowSystem {
+			return errors.New(strings.Join([]string{
+				"refusing to install as LocalSystem.",
+				"",
+				"This daemon runs egg install scripts and game servers, both third-party",
+				"code, so it should not hold SYSTEM authority. Create a dedicated account,",
+				`grant it "Replace a process level token" and "Adjust memory quotas for a`,
+				`process" in secpol.msc, then:`,
+				"",
+				`    wings.exe service install --account .\winwings --password <password>`,
+				"",
+				"Those two rights are the minimum needed to launch servers under their own",
+				"accounts, which is what isolates servers from one another.",
+				"",
+				"Pass --allow-system to override, and set system.account.allow_elevated",
+				"in the config to match.",
+			}, "\n"))
+		}
 
 		m, err := mgr.Connect()
 		if err != nil {
@@ -243,9 +269,11 @@ var serviceStatusCommand = &cobra.Command{
 
 func init() {
 	serviceInstallCommand.Flags().String("account", "",
-		"the account the service runs as; empty uses LocalSystem")
+		`the account the service runs as, e.g. .\winwings`)
 	serviceInstallCommand.Flags().String("password", "",
 		"password for --account; omit for a managed or virtual account")
+	serviceInstallCommand.Flags().Bool("allow-system", false,
+		"permit installing as LocalSystem, which is strongly discouraged")
 
 	serviceCommand.AddCommand(serviceInstallCommand)
 	serviceCommand.AddCommand(serviceUninstallCommand)

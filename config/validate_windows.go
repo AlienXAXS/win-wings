@@ -10,6 +10,8 @@ import (
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
+
+	"github.com/pterodactyl/wings/internal/winpriv"
 )
 
 // WorkerExecutable is the supervisor binary the daemon spawns per server.
@@ -27,11 +29,73 @@ func ValidateWindowsHost() error {
 	if err := validateWorkerBinary(); err != nil {
 		return err
 	}
+	if err := validatePrivileges(c.System.Account); err != nil {
+		return err
+	}
 	if err := validateAccounts(c.System.Account); err != nil {
 		return err
 	}
 	enableLongPaths()
 	warnIfPowerShellMissing()
+
+	return nil
+}
+
+// validatePrivileges checks the daemon is running with an appropriate amount of
+// authority: enough to separate servers from each other, and no more.
+//
+// There is a real tension here. Launching a process as another local account —
+// the mechanism that isolates servers — requires SeAssignPrimaryTokenPrivilege
+// and SeIncreaseQuotaPrivilege, which an ordinary user does not hold. The
+// tempting fix is to run as LocalSystem, which has them; that is the wrong
+// answer, because this daemon executes third-party install scripts and
+// supervises third-party game servers.
+//
+// The correct posture is a dedicated unprivileged account granted exactly those
+// two privileges.
+func validatePrivileges(a AccountConfiguration) error {
+	state, err := winpriv.Current()
+	if err != nil {
+		// Not fatal: an inability to read our own token should not stop a node
+		// from running, but the operator should know the check did not happen.
+		log.WithField("error", err).Warn("could not determine the daemon's privileges")
+		return nil
+	}
+
+	log.WithField("privileges", state.Describe()).Info("daemon security context")
+
+	if (state.IsSystem || state.IsAdmin || state.IsElevated) && !a.AllowElevated {
+		return errors.Errorf(
+			"config: refusing to run as %s. This daemon executes egg install scripts and "+
+				"supervises game servers, both third-party code, so a compromise of either "+
+				"should not yield the host.\n\n"+
+				"Create a dedicated account and grant it only SeAssignPrimaryTokenPrivilege "+
+				"and SeIncreaseQuotaPrivilege (secpol.msc -> Local Policies -> User Rights "+
+				"Assignment -> \"Replace a process level token\" and \"Adjust memory quotas "+
+				"for a process\"), then reinstall the service with:\n"+
+				"    wings.exe service install --account <domain>\\<account> --password <password>\n\n"+
+				"To override this deliberately, set system.account.allow_elevated to true.",
+			state.Account)
+	}
+
+	// Pool isolation without the privileges to use it would fail at the first
+	// server start, so say so now.
+	if a.Isolation == "pool" && !state.CanLaunchAsUser {
+		return errors.Errorf(
+			"config: system.account.isolation is \"pool\", but this account (%s) is missing "+
+				"%s. Without them the daemon cannot launch a process as another account, so "+
+				"servers cannot be isolated.\n\n"+
+				"Grant them via secpol.msc -> Local Policies -> User Rights Assignment:\n"+
+				"    SeAssignPrimaryTokenPrivilege = \"Replace a process level token\"\n"+
+				"    SeIncreaseQuotaPrivilege      = \"Adjust memory quotas for a process\"\n\n"+
+				"Or set system.account.isolation to \"shared\", accepting that every server "+
+				"runs as this account and none are isolated from one another.",
+			state.Account, strings.Join(state.Missing, " and "))
+	}
+
+	if state.CanLaunchAsUser && !state.IsSystem {
+		log.Info("running unprivileged with the token-assignment rights needed to isolate servers")
+	}
 
 	return nil
 }

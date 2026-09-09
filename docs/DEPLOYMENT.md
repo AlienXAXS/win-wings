@@ -147,31 +147,79 @@ any valid zone name works despite Windows not shipping one.
 Paste in the `runtime.runtimes` block that step 0 printed. Without it, an egg
 asking for `java-21` gets whichever JRE happens to be first on the host PATH.
 
-## 5. Install the service
+## 5. Create the service account
 
-The service account needs two privileges before per-server accounts will work:
+**The daemon must not run as LocalSystem.** It executes egg install scripts and
+supervises game servers, both third-party code; a compromise of either should not
+yield the host. `wings.exe service install` refuses LocalSystem, and the daemon
+refuses to start elevated.
 
-- `SeAssignPrimaryTokenPrivilege`
-- `SeIncreaseQuotaPrivilege`
+There is a genuine tension to understand here. Launching a process as another
+local account — the mechanism that isolates servers from one another — requires
+two privileges an ordinary user does not hold:
 
-`LocalSystem` has both. A dedicated account needs them granted via `secpol.msc`.
+| Privilege | Name in secpol.msc |
+|---|---|
+| `SeAssignPrimaryTokenPrivilege` | Replace a process level token |
+| `SeIncreaseQuotaPrivilege` | Adjust memory quotas for a process |
 
-From an **elevated** prompt:
+So a *completely* unprivileged daemon cannot isolate servers at all. The correct
+posture is a dedicated account holding exactly those two and nothing else — far
+less dangerous than SYSTEM, and sufficient.
 
 ```powershell
-C:\ProgramData\WinWings\wings.exe service install --config C:\ProgramData\WinWings\config.yml
+$pw = [System.Web.Security.Membership]::GeneratePassword(32, 8)
+New-LocalUser -Name winwings -Password (ConvertTo-SecureString $pw -AsPlainText -Force) `
+  -PasswordNeverExpires -UserMayNotChangePassword -Description "win-wings daemon"
+Remove-LocalGroupMember -Group Users -Member winwings
+```
+
+Grant it, in `secpol.msc` under Local Policies → User Rights Assignment:
+
+- **Replace a process level token**
+- **Adjust memory quotas for a process**
+- **Log on as a service**
+
+Then give it ownership of its own directories:
+
+```powershell
+icacls C:\ProgramData\WinWings /grant "winwings:(OI)(CI)M"
+icacls D:\servers /grant "winwings:(OI)(CI)F"
+```
+
+The daemon reports what it ended up with at boot:
+
+```
+INFO  daemon security context  privileges=account=HOST\winwings can_launch_as_user=true
+INFO  running unprivileged with the token-assignment rights needed to isolate servers
+```
+
+If those privileges are missing and `isolation: pool` is configured, it refuses
+to start and names exactly what to grant, rather than failing at the first server.
+
+## 6. Install the service
+
+From an **elevated** prompt — the install needs elevation, the service itself
+must not have it:
+
+```powershell
+C:\ProgramData\WinWings\wings.exe service install `
+  --config C:\ProgramData\WinWings\config.yml `
+  --account .\winwings --password <password>
 sc start winwings
 ```
 
-Check it:
+Check it (no elevation needed):
 
 ```powershell
 C:\ProgramData\WinWings\wings.exe service status
 ```
 
-`status` does not require elevation. `install` and `uninstall` do.
+`--allow-system` exists to override the refusal, and requires
+`system.account.allow_elevated: true` in the config to match. Only for a
+single-tenant node where every server is already trusted.
 
-## 6. Verify
+## 7. Verify
 
 ```powershell
 C:\ProgramData\WinWings\wings.exe diagnostics
@@ -219,8 +267,17 @@ sit in the same directory.
 **`system.account.isolation is "pool" but no accounts are configured`** — see
 step 2, or set `isolation: shared` and accept that servers are not isolated.
 
-**Server fails to start with a logon error** — the account lacks *Log on as a
-batch job*, or the daemon's account lacks `SeAssignPrimaryTokenPrivilege`.
+**`refusing to run as ...`** — the daemon is LocalSystem, an Administrators
+member, or elevated. See step 5. Override with `system.account.allow_elevated`
+only if you accept the consequence.
+
+**`isolation is "pool" but this account is missing ...`** — grant *Replace a
+process level token* and *Adjust memory quotas for a process* in `secpol.msc`,
+then restart the service.
+
+**Server fails to start with a logon error** — the *server* account lacks *Log on
+as a batch job* (step 2), or the *daemon* account lacks the two privileges above
+(step 5).
 
 **Console is empty for a steamcmd-based server** — that class of process detects
 a non-console stdout and drops output. Set `pseudo_console` on the egg's Windows
