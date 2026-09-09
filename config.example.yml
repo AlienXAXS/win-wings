@@ -1,0 +1,189 @@
+# win-wings example configuration.
+#
+# The daemon normally writes this itself after `wings configure --panel-url ...
+# --token ...`. This file documents the Windows-specific settings that have no
+# equivalent in upstream wings, and which the configure command cannot infer.
+#
+# Default location: C:\ProgramData\WinWings\config.yml
+
+debug: false
+
+# Filled in by `wings configure`.
+uuid: 00000000-0000-0000-0000-000000000000
+token_id: ''
+token: ''
+remote: 'https://panel.example.com'
+
+api:
+  host: 0.0.0.0
+  port: 8080
+  ssl:
+    enabled: false
+    cert: ''
+    key: ''
+  upload_limit: 100
+
+system:
+  root_directory: C:\ProgramData\WinWings
+  log_directory: C:\ProgramData\WinWings\logs
+
+  # Root beneath which every server gets its own directory tree:
+  #
+  #   <data>\<uuid>\                server root, owned by the daemon
+  #   <data>\<uuid>\data\          server files: the sandbox and SFTP root,
+  #                                 and what the Panel calls /home/container
+  #   <data>\<uuid>\runtime\         per-server runtime, when one is provisioned
+  #   <data>\<uuid>\worker.json     the resolved startup command
+  #   <data>\<uuid>\console.log
+  #
+  # The nesting is load-bearing. worker.json holds the command the worker
+  # executes, so a server able to write it would gain arbitrary code execution as
+  # its own account. Rooting the sandbox at data\ puts it out of reach — the
+  # server cannot address its own parent.
+  #
+  # It also keeps a per-server runtime out of the disk quota and out of backups,
+  # both of which are measured against the sandbox root.
+  #
+  # Deleting a server removes the whole <uuid> tree.
+  data: D:\servers
+
+  archive_directory: C:\ProgramData\WinWings\archives
+  backup_directory: C:\ProgramData\WinWings\backups
+  tmp_directory: C:\ProgramData\WinWings\tmp
+
+  # IANA time zone name, e.g. Europe/London. Windows names its zones differently
+  # ("GMT Standard Time") and Go ships no mapping between the two, so this must
+  # be set explicitly or the daemon falls back to UTC with a warning. The value
+  # is passed to servers as TZ.
+  timezone: Etc/UTC
+
+  account:
+    # How server processes are separated from each other.
+    #
+    # "managed" — the daemon creates one local Windows account per server, named
+    #             after the server's UUID, with a random password it keeps only
+    #             in memory, and deletes the account when the server is deleted.
+    #             It also sets the NTFS permissions that keep servers apart.
+    #             Nothing has to be created by hand. This needs the daemon to run
+    #             as an administrator; `wings service install` sets that up.
+    #
+    # "pool"    — you create the accounts below yourself and the daemon assigns
+    #             one to each server. The daemon then needs no administrator
+    #             rights, only "Replace a process level token" and "Adjust memory
+    #             quotas for a process". Choose this if an administrative daemon
+    #             is unacceptable on your host, and accept that the passwords
+    #             live on disk and the node is capped at one server per account.
+    #
+    # "shared"  — every server runs as one account (or as the daemon's own).
+    #             One compromised game server can then read every other server's
+    #             files AND this file, which holds the Panel token that controls
+    #             every server on the node. Use it only where every server is
+    #             equally trusted.
+    isolation: managed
+
+    # Prefixed to the account names created under "managed" isolation. A Windows
+    # local account name cannot exceed 20 characters and the rest of the name is
+    # the server's UUID, so keep this short. 8 characters is the maximum.
+    prefix: ww-
+
+    # Used only when isolation is "pool". Pre-create these accounts and grant
+    # them the "Log on as a batch job" right; see docs/DEPLOYMENT.md.
+    #
+    # A node can run at most this many servers at once. Assignment is by hash of
+    # the server UUID, so size the pool comfortably above your server count to
+    # avoid two servers sharing an account.
+    accounts: []
+    #  - username: winwings-srv01
+    #    # Supports the file:// prefix so the secret can live outside this file.
+    #    password: file://C:\ProgramData\WinWings\secrets\srv01
+
+    # Used only when isolation is "shared".
+    shared: ''
+
+    # Under "pool" or "shared": permit the daemon to run as an administrator,
+    # which it has no need to be. It refuses by default.
+    #
+    # Under "managed" the daemon must be an administrator, so this setting
+    # instead governs only whether it may run as LocalSystem — which it should
+    # not, because a dedicated account can be audited and revoked and SYSTEM
+    # cannot. See docs/DEPLOYMENT.md.
+    allow_elevated: false
+
+  sftp:
+    bind_address: 0.0.0.0
+    bind_port: 2022
+    read_only: false
+
+  disk_check_interval: 150
+  websocket_log_count: 150
+  check_permissions_on_boot: true
+
+  crash_detection:
+    enabled: true
+    detect_clean_exit_as_crash: false
+    timeout: 60
+
+# Replaces upstream's `docker:` block. Everything here maps onto Windows Job
+# Objects, which are the closest equivalent to the cgroup controls Docker gave.
+runtime:
+  # Maximum concurrently active processes per server
+  # (JOB_OBJECT_LIMIT_ACTIVE_PROCESS). Replaces container_pid_limit.
+  process_limit: 512
+
+  # Enforce a server's CPU limit even when the host is idle. With this off the
+  # limit becomes a relative weight that only applies under contention.
+  cpu_hard_cap: true
+
+  # Address handed to servers when an egg's config template references the
+  # node's interface. There is no bridge network here.
+  bind_address: 0.0.0.0
+
+  # Bounds on installation scripts. The higher of these and the server's own
+  # build limits applies, so a small server can still run a heavy install.
+  installer_limits:
+    memory: 1024
+    cpu: 100
+
+  # Memory headroom above a server's assigned memory before the Job Object's
+  # hard limit bites.
+  #
+  # This matters more than it did under Docker: a Job Object memory cap makes
+  # allocations *fail* rather than invoking an OOM killer, so a JVM sitting
+  # fractionally over its limit dies with an allocation error rather than being
+  # reaped. Defaults: 15% under 2G, 10% under 4G, 5% above.
+  overhead:
+    override: false
+    default_multiplier: 1.05
+
+  # Maps the runtime names eggs ask for onto directories on this host.
+  # scripts\provision-host.ps1 prints this block for you after installing.
+  #
+  # The matching bin directory is prepended to the PATH of that server and its
+  # install script, and exported as RUNTIME_PATH. Without this, an egg asking for
+  # java-21 gets whichever JRE is first on the host PATH.
+  runtimes: {}
+  #  java-8:  'C:\Program Files\Eclipse Adoptium\jre-8.0.504.1-hotspot'
+  #  java-17: 'C:\Program Files\Eclipse Adoptium\jre-17.0.20.101-hotspot'
+  #  java-21: 'C:\Program Files\Eclipse Adoptium\jre-21.0.12.101-hotspot'
+
+  # Refuse to run servers whose egg has no Windows profile. Turn this on once
+  # the Panel plugin is deployed; off lets a node come up against a stock Panel
+  # for testing.
+  require_windows_profile: false
+
+  console:
+    # Allocate a ConPTY for every server rather than honouring the per-egg
+    # setting.
+    #
+    # Leave this off. ConPTY is needed by processes that check whether stdout is
+    # a character device — steamcmd being the usual case — but it returns a VT
+    # stream with escape sequences rather than clean lines. Line-oriented
+    # servers, including everything JVM-based, produce better logs on pipes.
+    pseudo_console: false
+    columns: 200
+    rows: 50
+    max_size: 5
+    max_files: 1
+
+allowed_mounts: []
+allowed_origins: []

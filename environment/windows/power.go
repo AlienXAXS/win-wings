@@ -14,6 +14,7 @@ import (
 
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
+	"github.com/pterodactyl/wings/internal/accounts"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/internal/wire"
 	"github.com/pterodactyl/wings/internal/worker"
@@ -235,7 +236,11 @@ func (e *Environment) Start(ctx context.Context) error {
 	}
 
 	console := config.Get().Runtime.Console
-	username, password := e.account()
+	username, password, err := e.account()
+	if err != nil {
+		sawError = true
+		return err
+	}
 
 	if err := c.Start(wire.Start{
 		Argv:          argv,
@@ -301,8 +306,12 @@ func (e *Environment) resolveStartup(envVars []string) ([]string, error) {
 }
 
 // account returns the local account credentials this server runs under.
-func (e *Environment) account() (string, string) {
-	return config.Get().System.Account.For(e.Id)
+//
+// Under managed isolation this creates the account on first use, so it can fail
+// and can be slow the first time. Both are acceptable at the point it is called:
+// starting a server already talks to the account database to obtain a token.
+func (e *Environment) account() (string, string, error) {
+	return accounts.For(e.Id)
 }
 
 // Attach begins streaming console output. The worker is already buffering it, so

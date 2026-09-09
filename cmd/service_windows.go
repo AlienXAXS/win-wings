@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/pterodactyl/wings/internal/winuser"
 )
 
 // ServiceName is the Windows service the daemon registers as.
@@ -91,13 +93,29 @@ var serviceCommand = &cobra.Command{
 	Short: "Manage the win-wings Windows service.",
 }
 
+// DefaultServiceAccount is the local account the daemon creates for itself when
+// none is named.
+const DefaultServiceAccount = "winwings"
+
+// serviceAccountComment marks the account as the daemon's own, so that a later
+// reinstall can tell it apart from an account of the operator's that happens to
+// share the name.
+const serviceAccountComment = "win-wings daemon service account"
+
 var serviceInstallCommand = &cobra.Command{
 	Use:   "install",
 	Short: "Register win-wings as a Windows service.",
-	Long: "Registers this executable as a Windows service set to start automatically.\n\n" +
-		"Must be run from an elevated prompt. The service account needs the\n" +
-		"SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege rights if\n" +
-		"per-server account isolation is used.",
+	Long: `Registers this executable as a Windows service set to start automatically.
+
+Must be run from an elevated prompt.
+
+By default the daemon creates its own service account (.\winwings), gives it a
+random password nobody has to know, adds it to Administrators, and grants it the
+rights it needs to launch servers under their own accounts. Nothing has to be
+prepared in secpol.msc or Local Users and Groups first.
+
+Pass --account with --password to use an account you have already created, or
+--account with --no-create for a managed service account or a virtual account.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		exe, err := os.Executable()
 		if err != nil {
@@ -111,28 +129,36 @@ var serviceInstallCommand = &cobra.Command{
 		account, _ := cmd.Flags().GetString("account")
 		password, _ := cmd.Flags().GetString("password")
 		allowSystem, _ := cmd.Flags().GetBool("allow-system")
+		noCreate, _ := cmd.Flags().GetBool("no-create")
 
-		// An empty ServiceStartName means LocalSystem. The daemon refuses to run
-		// that way by default, so installing it that way would produce a service
-		// that fails at startup with a message the operator only sees in the log.
-		// Refuse here instead, where they are already at a prompt.
-		if account == "" && !allowSystem {
-			return errors.New(strings.Join([]string{
-				"refusing to install as LocalSystem.",
-				"",
-				"This daemon runs egg install scripts and game servers, both third-party",
-				"code, so it should not hold SYSTEM authority. Create a dedicated account,",
-				`grant it "Replace a process level token" and "Adjust memory quotas for a`,
-				`process" in secpol.msc, then:`,
-				"",
-				`    wings.exe service install --account .\winwings --password <password>`,
-				"",
-				"Those two rights are the minimum needed to launch servers under their own",
-				"accounts, which is what isolates servers from one another.",
-				"",
-				"Pass --allow-system to override, and set system.account.allow_elevated",
-				"in the config to match.",
-			}, "\n"))
+		switch {
+		case allowSystem:
+			// An empty ServiceStartName means LocalSystem. Left alone.
+			account, password = "", ""
+
+		default:
+			if account == "" {
+				account = `.\` + DefaultServiceAccount
+			}
+			// A password supplied on the command line means the operator owns
+			// the account and the daemon should leave it alone; so does
+			// --no-create, which is how a managed or virtual service account is
+			// installed.
+			if password == "" && !noCreate {
+				name, err := localAccountName(account)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Creating and configuring the service account %s...\n", account)
+				password, err = winuser.EnsureServiceAccount(name, serviceAccountComment)
+				if err != nil {
+					return err
+				}
+				fmt.Println("  Password:   randomly generated, held by the service control manager")
+				fmt.Println("  Groups:     Administrators")
+				fmt.Println("  Rights:     log on as a service, replace a process level token,")
+				fmt.Println("              adjust memory quotas; interactive logon denied")
+			}
 		}
 
 		m, err := mgr.Connect()
@@ -179,10 +205,41 @@ var serviceInstallCommand = &cobra.Command{
 	},
 }
 
+// localAccountName reduces a service account specification to the bare SAM name
+// the network management API expects.
+//
+// `.\winwings` and `WINSRV01\winwings` are both this host's `winwings`.
+// Anything else names an account this daemon has no business creating, and the
+// operator is told to supply its password instead.
+func localAccountName(account string) (string, error) {
+	domain, name, ok := strings.Cut(account, `\`)
+	if !ok {
+		return account, nil
+	}
+
+	host, err := os.Hostname()
+	if err != nil {
+		host = ""
+	}
+	if domain == "." || (host != "" && strings.EqualFold(domain, host)) {
+		return name, nil
+	}
+
+	return "", errors.New(strings.Join([]string{
+		fmt.Sprintf("%q is not a local account, so this command cannot create it.", account),
+		"",
+		"Supply its password instead:",
+		fmt.Sprintf(`    wings.exe service install --account %s --password <password>`, account),
+		"",
+		"or pass --no-create if it is a managed service account or a virtual account,",
+		"which authenticate without one.",
+	}, "\n"))
+}
+
 var serviceUninstallCommand = &cobra.Command{
 	Use:   "uninstall",
 	Short: "Remove the win-wings Windows service.",
-	RunE: func(*cobra.Command, []string) error {
+	RunE: func(cmd *cobra.Command, _ []string) error {
 		m, err := mgr.Connect()
 		if err != nil {
 			return fmt.Errorf("could not connect to the service manager (run elevated): %w", err)
@@ -195,12 +252,49 @@ var serviceUninstallCommand = &cobra.Command{
 		}
 		defer s.Close()
 
+		account := ""
+		if cfg, err := s.Config(); err == nil {
+			account = cfg.ServiceStartName
+		}
+
 		if err := s.Delete(); err != nil {
 			return fmt.Errorf("could not remove the service: %w", err)
 		}
 		_ = eventlog.Remove(ServiceName)
 
 		fmt.Printf("Service %q removed.\n", ServiceName)
+
+		// The account is left in place by default. Removing the service is
+		// usually a step in reinstalling it, and deleting the account in between
+		// would strip the ACLs that name it — every server's data directory
+		// would be left granting access to a SID that no longer resolves.
+		if remove, _ := cmd.Flags().GetBool("remove-account"); remove {
+			name, err := localAccountName(account)
+			if err != nil {
+				return err
+			}
+			info, err := winuser.Lookup(name)
+			if err != nil {
+				return err
+			}
+			switch {
+			case info == nil:
+				fmt.Printf("Account %s does not exist.\n", account)
+			case info.Comment != serviceAccountComment:
+				fmt.Printf("Account %s was not created by this daemon; leaving it alone.\n", account)
+			default:
+				if sid, err := winuser.SID(name); err == nil {
+					_ = winuser.RemoveAllRights(sid)
+				}
+				if err := winuser.Delete(name); err != nil {
+					return err
+				}
+				fmt.Printf("Account %s removed.\n", account)
+			}
+		} else if account != "" {
+			fmt.Printf("Account %s was left in place; pass --remove-account to delete it.\n", account)
+		}
+
 		fmt.Println("Note: running servers were not stopped. Each is supervised by its own")
 		fmt.Println("worker process and will keep running until stopped explicitly.")
 		return nil
@@ -271,9 +365,13 @@ func init() {
 	serviceInstallCommand.Flags().String("account", "",
 		`the account the service runs as, e.g. .\winwings`)
 	serviceInstallCommand.Flags().String("password", "",
-		"password for --account; omit for a managed or virtual account")
+		"password for an existing --account; omit to have the daemon create and manage it")
+	serviceInstallCommand.Flags().Bool("no-create", false,
+		"use --account as it already exists, without creating or configuring it")
 	serviceInstallCommand.Flags().Bool("allow-system", false,
 		"permit installing as LocalSystem, which is strongly discouraged")
+	serviceUninstallCommand.Flags().Bool("remove-account", false,
+		"also delete the service account the daemon created for itself")
 
 	serviceCommand.AddCommand(serviceInstallCommand)
 	serviceCommand.AddCommand(serviceUninstallCommand)

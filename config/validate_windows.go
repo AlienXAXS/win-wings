@@ -12,6 +12,7 @@ import (
 	"github.com/apex/log"
 
 	"github.com/pterodactyl/wings/internal/winpriv"
+	"github.com/pterodactyl/wings/internal/winuser"
 )
 
 // WorkerExecutable is the supervisor binary the daemon spawns per server.
@@ -42,17 +43,28 @@ func ValidateWindowsHost() error {
 }
 
 // validatePrivileges checks the daemon is running with an appropriate amount of
-// authority: enough to separate servers from each other, and no more.
+// authority for the isolation mode in force.
 //
-// There is a real tension here. Launching a process as another local account —
-// the mechanism that isolates servers — requires SeAssignPrimaryTokenPrivilege
-// and SeIncreaseQuotaPrivilege, which an ordinary user does not hold. The
-// tempting fix is to run as LocalSystem, which has them; that is the wrong
-// answer, because this daemon executes third-party install scripts and
-// supervises third-party game servers.
+// There is a real tension here, and which way it resolves depends on who is
+// expected to create the accounts.
 //
-// The correct posture is a dedicated unprivileged account granted exactly those
-// two privileges.
+// Launching a process as another local account — the mechanism that isolates
+// servers — requires SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege,
+// which an ordinary user does not hold. *Creating* those accounts, and setting
+// NTFS ownership on their directories, requires administrator rights on top of
+// that.
+//
+// Under "managed" isolation the daemon does both, so it is an administrator and
+// this function checks that it is. The authority is real and worth stating
+// plainly: a compromise of the daemon is a compromise of the host. What it buys
+// is that a compromise of a *server* — the far likelier event, since servers run
+// third-party code that faces the internet — reaches nothing but that server's
+// own files, because every server has its own unprivileged account and an ACL
+// that admits only it.
+//
+// Under "pool" or "shared" the operator creates the accounts, the daemon needs
+// only the two privileges, and running as an administrator is then unnecessary
+// authority that this function refuses.
 func validatePrivileges(a AccountConfiguration) error {
 	state, err := winpriv.Current()
 	if err != nil {
@@ -63,6 +75,10 @@ func validatePrivileges(a AccountConfiguration) error {
 	}
 
 	log.WithField("privileges", state.Describe()).Info("daemon security context")
+
+	if a.Isolation == "managed" {
+		return validateManagedPrivileges(a, state)
+	}
 
 	if (state.IsSystem || state.IsAdmin || state.IsElevated) && !a.AllowElevated {
 		return errors.Errorf(
@@ -100,6 +116,57 @@ func validatePrivileges(a AccountConfiguration) error {
 	return nil
 }
 
+// validateManagedPrivileges checks the daemon can do what managed isolation
+// requires of it: create local accounts, and launch processes as them.
+func validateManagedPrivileges(a AccountConfiguration, state winpriv.State) error {
+	if state.IsSystem && !a.AllowElevated {
+		return errors.New(
+			"config: refusing to run as LocalSystem. Managed isolation needs administrator " +
+				"rights, but not the unrestricted authority of the SYSTEM account, and a " +
+				"dedicated account can be audited and revoked where SYSTEM cannot.\n\n" +
+				"Reinstall the service with an account of its own — the daemon will create " +
+				"and configure it for you:\n" +
+				"    wings.exe service install\n\n" +
+				"To override this deliberately, set system.account.allow_elevated to true.")
+	}
+
+	if !state.IsAdmin && !state.IsSystem {
+		return errors.Errorf(
+			"config: system.account.isolation is \"managed\", which means this daemon creates "+
+				"a local account per server and sets the NTFS permissions that keep servers "+
+				"apart. Both need administrator rights, and this account (%s) does not have "+
+				"them.\n\n"+
+				"Either reinstall the service so it runs as an account the daemon manages:\n"+
+				"    wings.exe service install\n\n"+
+				"or set system.account.isolation to \"pool\" and create the server accounts "+
+				"yourself, which keeps this daemon unprivileged. See docs/DEPLOYMENT.md.",
+			state.Account)
+	}
+
+	// Administrators hold SeIncreaseQuotaPrivilege by default but not
+	// SeAssignPrimaryTokenPrivilege, so an administrative account is not
+	// automatically able to launch a process as somebody else. It can grant
+	// itself the right, but LSA evaluates account rights at logon, so it does
+	// not take effect until the service restarts.
+	if !state.CanLaunchAsUser {
+		if err := winuser.GrantSelfRights(); err != nil {
+			return errors.Errorf(
+				"config: this account (%s) is missing %s, which are needed to launch a server "+
+					"under its own account, and they could not be granted automatically: %v",
+				state.Account, strings.Join(state.Missing, " and "), err)
+		}
+		return errors.Errorf(
+			"config: this account (%s) was missing %s. They have now been granted, but Windows "+
+				"only applies account rights at logon, so the daemon has to be restarted before "+
+				"it can use them.\n\n"+
+				"    sc stop winwings && sc start winwings",
+			state.Account, strings.Join(state.Missing, " and "))
+	}
+
+	log.Info("managed isolation active: server accounts are created, secured and removed by the daemon")
+	return nil
+}
+
 // validateWorkerBinary confirms the supervisor is deployed alongside the daemon.
 func validateWorkerBinary() error {
 	exe, err := os.Executable()
@@ -121,6 +188,26 @@ func validateWorkerBinary() error {
 // validateAccounts checks the server isolation configuration is coherent.
 func validateAccounts(a AccountConfiguration) error {
 	switch a.Isolation {
+	case "managed":
+		prefix := strings.TrimSpace(a.Prefix)
+		if prefix == "" {
+			return errors.New(
+				"config: system.account.prefix must not be empty. It is what distinguishes " +
+					"the accounts this daemon creates from every other account on the host, " +
+					"and the daemon will not touch an account that does not carry it")
+		}
+		// A local account name cannot exceed 20 characters, and the rest of the
+		// name is the server's UUID. Leaving fewer than 12 hex characters of it
+		// makes collisions between two servers plausible rather than negligible.
+		if len(prefix) > 8 {
+			return errors.Errorf(
+				"config: system.account.prefix %q is too long. A Windows local account name "+
+					"is capped at 20 characters and the remainder identifies the server, so "+
+					"the prefix must be 8 characters or fewer", prefix)
+		}
+		log.WithField("prefix", prefix).
+			Info("servers are isolated using local accounts created and removed by the daemon")
+
 	case "pool":
 		if len(a.Accounts) == 0 {
 			return errors.New(
@@ -160,7 +247,8 @@ func validateAccounts(a AccountConfiguration) error {
 
 	default:
 		return errors.Errorf(
-			"config: system.account.isolation must be \"pool\" or \"shared\", got %q", a.Isolation)
+			"config: system.account.isolation must be \"managed\", \"pool\" or \"shared\", got %q",
+			a.Isolation)
 	}
 
 	return nil

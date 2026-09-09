@@ -16,7 +16,7 @@ this exists so they can run natively.
 |---|---|
 | cgroup resource limits | Windows Job Objects |
 | kill the container, kill the tree | `TerminateJobObject` |
-| filesystem isolation | separate local accounts + NTFS ACLs |
+| filesystem isolation | one local account per server + NTFS ACLs, both daemon-managed |
 | port publishing | **nothing** — servers are trusted to honour their allocation |
 | console surviving daemon restart | a per-server worker process |
 | `openat2` path sandbox | Go's `os.Root` |
@@ -65,14 +65,23 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). In short:
 C:\ProgramData\WinWings\wings.exe service install --config C:\ProgramData\WinWings\config.yml
 sc start winwings
 
+# Elevated: prove the host actually works before pointing the Panel at it
+C:\ProgramData\WinWings\wings.exe selftest --config C:\ProgramData\WinWings\config.yml
+
 # Unelevated
 C:\ProgramData\WinWings\wings.exe service status
 C:\ProgramData\WinWings\wings.exe diagnostics
 ```
 
-Do not skip the account setup in step 2 of the deployment guide. Without it every
-server runs as the daemon's account and can read every other server's files, plus
-the config file holding your Panel token. The daemon warns about this at boot.
+`service install` creates the daemon's own account, gives it a random password
+nobody has to know, and grants it exactly the rights it needs. Nothing has to be
+prepared in `secpol.msc` first.
+
+Each server then gets its own local account, created and deleted with the server
+and named after its UUID, with a random password held only in memory. That
+account plus an NTFS ACL is what keeps one server out of another's files, so it
+is worth running `selftest` once on a new host: it creates two throwaway servers
+and checks that neither can read the other.
 
 ## Testing
 

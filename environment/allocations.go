@@ -1,6 +1,5 @@
 package environment
 
-
 // Allocations defines the addresses and ports assigned to a given server.
 type Allocations struct {
 	// ForceOutgoingIP is accepted from the Panel and ignored.

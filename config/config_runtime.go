@@ -132,18 +132,30 @@ type ConsoleConfiguration struct {
 type AccountConfiguration struct {
 	// Isolation selects how server processes are separated from each other.
 	//
-	//   "pool"   — each server is assigned a distinct pre-created local account
-	//              from Accounts. Strongest isolation available without admin
-	//              rights at runtime, since NTFS ACLs then separate servers.
-	//   "shared" — every server runs as the account named by Shared. Simple, and
-	//              acceptable only for single-tenant nodes where every server is
-	//              already trusted equally.
-	Isolation string `default:"pool" json:"isolation" yaml:"isolation"`
+	//   "managed" — the daemon creates one local account per server, named after
+	//               the server's UUID, with a random password it keeps only in
+	//               memory, and deletes the account when the server is deleted.
+	//               Requires the daemon to run as an administrator. This is the
+	//               default and what an operator should use.
+	//   "pool"    — each server is assigned a distinct pre-created local account
+	//               from Accounts, whose passwords live in this file. For hosts
+	//               where the daemon must not hold administrator rights and the
+	//               operator is willing to maintain the accounts by hand.
+	//   "shared"  — every server runs as the account named by Shared. Simple,
+	//               and acceptable only for single-tenant nodes where every
+	//               server is already trusted equally.
+	Isolation string `default:"managed" json:"isolation" yaml:"isolation"`
+
+	// Prefix is prepended to the account names the daemon creates under
+	// "managed" isolation. A Windows local account name is capped at 20
+	// characters and the rest is the server's UUID, so a longer prefix means
+	// fewer UUID characters and a higher chance of two servers colliding on one
+	// name. Three characters is the intended size.
+	Prefix string `default:"ww-" json:"prefix" yaml:"prefix"`
 
 	// Accounts is the pool of local accounts available to servers when Isolation
-	// is "pool". Create these once at install time; the daemon does not create
-	// accounts itself, as that requires administrator rights it should not hold
-	// while running.
+	// is "pool". Under "managed" isolation this is unused: the daemon creates
+	// the accounts itself.
 	//
 	// A node can run at most len(Accounts) servers concurrently.
 	Accounts []PoolAccount `json:"accounts" yaml:"accounts"`
@@ -151,21 +163,24 @@ type AccountConfiguration struct {
 	// Shared names the account used when Isolation is "shared".
 	Shared string `default:"" json:"shared" yaml:"shared"`
 
-	// AllowElevated permits the daemon to run as LocalSystem, as a member of the
-	// Administrators group, or with an elevated token.
+	// AllowElevated permits the daemon to run as an administrator under "pool"
+	// or "shared" isolation, where it has no need to.
 	//
-	// Off by default, and the daemon refuses to start in that state. It executes
-	// egg install scripts and supervises game servers, both of which are
-	// third-party code; a compromise of either should not yield the host.
+	// Under "managed" isolation the daemon must be an administrator — creating
+	// accounts and rewriting NTFS ownership are privileged operations — so this
+	// setting does not apply and the check is inverted: the daemon refuses to
+	// start if it is *not* an administrator.
 	//
-	// The correct deployment is a dedicated unprivileged account granted only
-	// SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege, which is the
-	// minimum needed to launch servers under their own accounts. See
-	// docs/DEPLOYMENT.md.
+	// It never permits running as LocalSystem. See docs/DEPLOYMENT.md.
 	AllowElevated bool `default:"false" json:"allow_elevated" yaml:"allow_elevated"`
 }
 
-// For returns the local account credentials a given server should run under.
+// For returns the local account credentials a given server should run under,
+// for the isolation modes whose accounts are configured rather than created.
+//
+// "managed" is deliberately absent: its accounts are created on demand and its
+// passwords exist only in memory, so it cannot be answered from configuration.
+// Call internal/accounts.For instead, which handles every mode.
 //
 // Pool assignment is by hash of the server UUID rather than by allocation order,
 // so it is stable across daemon restarts without persisting a mapping. Two

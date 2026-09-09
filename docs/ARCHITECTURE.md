@@ -16,7 +16,7 @@ separately:
 |---|---|
 | cgroup resource limits | Windows Job Objects (`internal/jobobject`) |
 | kill the container, kill the tree | `TerminateJobObject` |
-| filesystem isolation | separate local accounts + NTFS ACLs |
+| filesystem isolation | one local account per server + NTFS ACLs, both daemon-managed |
 | network namespace, port publishing | **nothing** — see below |
 | console surviving daemon restart | a per-server worker process |
 | `/mnt/server` bind mount for installs | `$env:SERVER_DIR` |
@@ -131,11 +131,24 @@ is trusted to honour it. A misconfigured or malicious server can bind any free
 port. Constraining that requires per-account firewall rules applied outside the
 daemon.
 
-**Isolation depends on configuration.** With `isolation: pool` and correct ACLs,
-NTFS separates servers. With `isolation: shared`, one compromised server can read
-every other server's files and the daemon's configuration — which holds the Panel
-token controlling every server on the node. The daemon warns loudly about this at
-boot.
+**The daemon is an administrator, by default and by design.** Under
+`isolation: managed` it creates a local account per server, grants it the batch
+logon right, and rewrites NTFS ownership — all privileged operations. So a
+compromise of the daemon is a compromise of the host.
+
+That is a deliberate trade rather than an oversight. The alternative,
+`isolation: pool`, keeps the daemon unprivileged but moves account creation onto
+the operator, puts the passwords on disk, and caps the node at one server per
+pre-created account. Both are supported; managed is the default because the
+likely compromise is a *server*, not the daemon, and managed isolation is the one
+an operator will actually get right. Every server runs as its own unprivileged
+account, denied every logon type but batch, behind an ACL that admits nothing
+else.
+
+With `isolation: shared` there is no separation at all: one compromised server
+can read every other server's files and the daemon's configuration, which holds
+the Panel token controlling every server on the node. The daemon warns loudly
+about this at boot.
 
 **No network namespace**, so per-server network statistics are reported as zero.
 

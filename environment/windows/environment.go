@@ -24,6 +24,7 @@ import (
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/events"
+	"github.com/pterodactyl/wings/internal/accounts"
 	"github.com/pterodactyl/wings/internal/winacl"
 	"github.com/pterodactyl/wings/internal/wire"
 	"github.com/pterodactyl/wings/internal/worker"
@@ -250,7 +251,10 @@ func (e *Environment) Create() error {
 // server able to write worker.json could rewrite the command its worker
 // executes, which is arbitrary code execution as its own account.
 func (e *Environment) applyPermissions() error {
-	username, _ := e.account()
+	username, _, err := e.account()
+	if err != nil {
+		return err
+	}
 	if username == "" {
 		// Shared isolation: there is no distinct account to grant, and the
 		// operator has already been told servers are not separated.
@@ -287,6 +291,16 @@ func (e *Environment) Destroy() error {
 	// together.
 	if err := os.RemoveAll(e.ServerRoot()); err != nil && !os.IsNotExist(err) {
 		return errors.Wrap(err, "environment/windows: failed to remove the server directory")
+	}
+
+	// The account outlives the files unless it is removed explicitly, and a node
+	// that has churned through servers would otherwise accumulate one dormant
+	// local account per server it has ever hosted.
+	//
+	// Deliberately after the files: an account still holding open handles is a
+	// reason to keep it, and a failure here should not leave the tree behind.
+	if err := accounts.Release(e.Id); err != nil {
+		return errors.Wrap(err, "environment/windows: failed to remove the server's account")
 	}
 	return nil
 }

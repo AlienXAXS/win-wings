@@ -26,6 +26,10 @@
 /config.yaml
 /config*.yaml
 
+# ...but the annotated example is documentation, and docs/DEPLOYMENT.md tells
+# operators to copy it.
+!/config.example.yml
+
 # Ignore Vagrant stuff
 /.vagrant
 

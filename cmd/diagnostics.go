@@ -116,7 +116,11 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	fmt.Fprintln(output, "    Backup Directory:", cfg.System.BackupDirectory)
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "           Isolation:", cfg.System.Account.Isolation)
-	fmt.Fprintln(output, "        Pool Accounts:", len(cfg.System.Account.Accounts))
+	if cfg.System.Account.Isolation == "managed" {
+		fmt.Fprintln(output, "      Account Prefix:", cfg.System.Account.Prefix)
+	} else {
+		fmt.Fprintln(output, "       Pool Accounts:", len(cfg.System.Account.Accounts))
+	}
 	fmt.Fprintln(output, "         Server Time:", time.Now().Format(time.RFC1123Z))
 	fmt.Fprintln(output, "          Debug Mode:", cfg.Debug)
 

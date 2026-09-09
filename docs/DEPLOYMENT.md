@@ -21,7 +21,7 @@ Both binaries must be deployed **in the same directory**. The daemon spawns the
 worker from alongside itself and refuses to start if it is missing.
 
 ```powershell
-.uild.ps1 -Release
+.\build.ps1 -Release
 ```
 
 Produces `build\wings.exe` and `build\winwings-worker.exe`. (`make release`
@@ -62,72 +62,21 @@ exclusions yourself.
 ## 1. Create the directory layout
 
 ```powershell
-New-Item -ItemType Directory -Force C:\ProgramData\WinWings\{logs,volumes,instances,archives,backups,tmp,secrets}
-Copy-Item build\wings.exe, build\winwings-worker.exe C:\ProgramData\WinWings\
+New-Item -ItemType Directory -Force C:\ProgramData\WinWings\logs,C:\ProgramData\WinWings\archives,C:\ProgramData\WinWings\backups,C:\ProgramData\WinWings\tmp
+New-Item -ItemType Directory -Force D:\servers
+Copy-Item build\wings.exe,build\winwings-worker.exe C:\ProgramData\WinWings\
 ```
 
-`instances` must not sit inside `volumes`. It holds each server's resolved
-startup command, and a server able to write there could rewrite what its own
-worker executes. The daemon logs an error at boot if the two overlap.
+`D:\servers` is `system.data`. Every server gets one directory tree beneath it,
+named by its UUID, and deleting a server removes the whole tree. Put it on
+whichever volume has the space; it must be **NTFS**, because the separation
+between servers is enforced by NTFS ACLs and there is none on FAT32 or exFAT.
 
-## 2. Create the server accounts
+You do not need to set permissions on it. The daemon severs inheritance on each
+server's directory as it creates it, and grants only that server's own account
+access to its files.
 
-This is the step that determines whether servers are isolated from each other.
-Skipping it means every server runs as the daemon's account and can read every
-other server's files *and* your Panel token.
-
-Create one account per concurrent server you intend to run:
-
-```powershell
-# Repeat for srv02, srv03, ...
-$pw = [System.Web.Security.Membership]::GeneratePassword(32, 8)
-New-LocalUser -Name winwings-srv01 -Password (ConvertTo-SecureString $pw -AsPlainText -Force) `
-  -PasswordNeverExpires -UserMayNotChangePassword `
-  -Description "win-wings server account"
-Set-Content -Path C:\ProgramData\WinWings\secrets\srv01 -Value $pw -NoNewline
-```
-
-Remove them from `Users` so they cannot read the rest of the system:
-
-```powershell
-Remove-LocalGroupMember -Group Users -Member winwings-srv01
-```
-
-Grant each account the **Log on as a batch job** right (`SeBatchLogonRight`).
-There is no PowerShell cmdlet for this; use `secpol.msc` → Local Policies → User
-Rights Assignment, or export and edit with `secedit`.
-
-Restrict the secrets directory to the daemon's account only:
-
-```powershell
-icacls C:\ProgramData\WinWings\secrets /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
-```
-
-## 3. Lock down the servers root
-
-Set the top of the tree so server accounts cannot roam it:
-
-```powershell
-icacls D:\servers /inheritance:r `
-  /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
-```
-
-**Per-server permissions are applied by the daemon**, not by you. When a server
-is created it severs inheritance on `<uuid>\` and grants that server's assigned
-account exclusive write access to `<uuid>\data` only — so its `worker.json`,
-which holds the command its worker executes, stays out of its own reach.
-
-If the daemon lacks the rights to do that it logs a warning per server and
-carries on; the servers run, but they are not isolated from one another.
-
-Also protect the configuration file, which holds the Panel token:
-
-```powershell
-icacls C:\ProgramData\WinWings\config.yml /inheritance:r `
-  /grant:r "SYSTEM:F" "Administrators:F"
-```
-
-## 4. Configure
+## 2. Configure
 
 Either run the Panel's node configuration command:
 
@@ -136,102 +85,180 @@ C:\ProgramData\WinWings\wings.exe configure --panel-url https://panel.example.co
 ```
 
 …or copy `config.example.yml` to `C:\ProgramData\WinWings\config.yml` and fill it
-in. Either way you must then add the `system.account` block by hand — the
-configure command knows nothing about Windows accounts.
+in.
 
-Set `system.timezone` to an IANA name (`Europe/London`, not `GMT Standard Time`).
-Windows and IANA name zones differently and Go ships no mapping, so an unset
-value falls back to UTC with a warning. The daemon embeds the IANA database, so
-any valid zone name works despite Windows not shipping one.
+Three settings the configure command knows nothing about:
 
-Paste in the `runtime.runtimes` block that step 0 printed. Without it, an egg
-asking for `java-21` gets whichever JRE happens to be first on the host PATH.
+- `system.data` — where servers live (`D:\servers` above).
+- `system.timezone` — an IANA name (`Europe/London`, not `GMT Standard Time`).
+  Windows and IANA name zones differently and Go ships no mapping, so an unset
+  value falls back to UTC with a warning. The daemon embeds the IANA database,
+  so any valid zone name works despite Windows not shipping one.
+- `runtime.runtimes` — paste in the block that step 0 printed. Without it, an
+  egg asking for `java-21` gets whichever JRE happens to be first on the host
+  PATH.
 
-## 5. Create the service account
+Leave `system.account.isolation` at `managed` unless you have read the appendix
+at the end of this document and decided otherwise.
 
-**The daemon must not run as LocalSystem.** It executes egg install scripts and
-supervises game servers, both third-party code; a compromise of either should not
-yield the host. `wings.exe service install` refuses LocalSystem, and the daemon
-refuses to start elevated.
+Protect the file, which holds the Panel token:
 
-There is a genuine tension to understand here. Launching a process as another
-local account — the mechanism that isolates servers from one another — requires
-two privileges an ordinary user does not hold:
+```powershell
+icacls C:\ProgramData\WinWings\config.yml /inheritance:r /grant:r "SYSTEM:F" "Administrators:F"
+```
+
+## 3. Install the service
+
+From an **elevated** prompt:
+
+```powershell
+C:\ProgramData\WinWings\wings.exe service install --config C:\ProgramData\WinWings\config.yml
+```
+
+That one command creates everything the daemon needs to run:
+
+| | |
+|---|---|
+| Account | `.\winwings`, created if absent |
+| Password | randomly generated, handed to the service control manager, never written down and never shown |
+| Groups | Administrators |
+| Rights granted | Log on as a service, Replace a process level token, Adjust memory quotas for a process |
+| Rights denied | Interactive logon, remote interactive logon |
+
+Then:
+
+```powershell
+sc start winwings
+C:\ProgramData\WinWings\wings.exe service status   # no elevation needed
+```
+
+`service uninstall` leaves the account in place, because removing the service is
+usually a step in reinstalling it and deleting the account in between would
+strip the ACLs naming it — every server's data directory would be left granting
+access to a SID that no longer resolves. Pass `--remove-account` when you mean
+it.
+
+### Why the daemon is an administrator
+
+Worth being explicit about rather than discovering later.
+
+Under `managed` isolation the daemon creates a local account per server, grants
+it the batch logon right, and rewrites NTFS ownership on that server's
+directory. All three are privileged operations. So **a compromise of the daemon
+is a compromise of the host**, and no amount of configuration changes that.
+
+What the design buys is the case that actually happens. A game server runs
+third-party code, faces the internet, and is exposed by whatever an egg's author
+wrote; it is far likelier to be compromised than the daemon is. Every server
+runs as its own unprivileged account, denied every form of logon except batch,
+with an ACL on its directory that admits nothing else. A compromised server
+reaches its own files and stops there.
+
+It is still a dedicated account rather than LocalSystem, which is not cosmetic:
+it can be audited in the security log, its rights can be listed and revoked, and
+it is denied interactive logon. `wings service install` refuses LocalSystem, and
+the daemon refuses to start as LocalSystem unless `system.account.allow_elevated`
+is set.
+
+If an administrative daemon is unacceptable on your host, see the appendix.
+
+## 4. Verify
+
+```powershell
+C:\ProgramData\WinWings\wings.exe selftest --config C:\ProgramData\WinWings\config.yml
+```
+
+This does the real thing rather than inspecting configuration. It creates two
+throwaway accounts, gives each a directory with the permissions a real server
+gets, launches a process as each, and checks that one can write its own files,
+cannot read the other's, and cannot rewrite its own `worker.json`. It also
+exercises the Job Object memory and process limits, long path support and the
+worker binary, then removes everything it created.
+
+Run it elevated — unelevated, the account checks are skipped rather than failed.
+Every check runs regardless of whether earlier ones failed, so one run tells you
+everything that is wrong with the host:
+
+```
+Accounts and isolation
+  PASS   account lifecycle                      created wwt-000000000000se01, wwt-000000000000se02
+  PASS   NTFS permissions applied               each server's data directory admits only its own account
+  PASS   logon as a server account              both accounts obtained a batch logon token
+  PASS   run a process as a server account      a process launched as wwt-... reported itself as wwt-...
+  PASS   server can write its own files         wrote and read back a file in its data directory
+  PASS   server cannot read another server      wwt-... was denied D:\servers\...\data\secret.txt
+  PASS   server cannot write its worker config  the server was denied write access to its own worker.json
+  PASS   job object process limit               an active process limit stopped a second process from starting
+  PASS   job object memory limit                a 256MB allocation was refused inside a 64MB job
+```
+
+`--keep` leaves the accounts and directories in place if you want to inspect
+them; without it they are removed even when checks fail. A failed run exits
+non-zero, so it can gate a provisioning script.
+
+Then the general report, and the log:
+
+```powershell
+C:\ProgramData\WinWings\wings.exe diagnostics
+Get-Content C:\ProgramData\WinWings\logs\wings.log -Wait -Tail 50
+```
+
+## Appendix: running without administrator rights
+
+`managed` isolation trades an administrative daemon for automatic account
+management. If that trade is wrong for your host, `pool` isolation reverses it:
+you create the accounts and the daemon stays unprivileged.
+
+There is still a floor. Launching a process as another local account — the
+mechanism that isolates servers at all — requires two privileges an ordinary
+user does not hold:
 
 | Privilege | Name in secpol.msc |
 |---|---|
 | `SeAssignPrimaryTokenPrivilege` | Replace a process level token |
 | `SeIncreaseQuotaPrivilege` | Adjust memory quotas for a process |
 
-So a *completely* unprivileged daemon cannot isolate servers at all. The correct
-posture is a dedicated account holding exactly those two and nothing else — far
-less dangerous than SYSTEM, and sufficient.
+So a *completely* unprivileged daemon cannot isolate servers. The posture is a
+dedicated account holding exactly those two and nothing else.
+
+Create the daemon's account:
 
 ```powershell
 $pw = [System.Web.Security.Membership]::GeneratePassword(32, 8)
 New-LocalUser -Name winwings -Password (ConvertTo-SecureString $pw -AsPlainText -Force) `
   -PasswordNeverExpires -UserMayNotChangePassword -Description "win-wings daemon"
-Remove-LocalGroupMember -Group Users -Member winwings
 ```
 
 Grant it, in `secpol.msc` under Local Policies → User Rights Assignment:
-
-- **Replace a process level token**
-- **Adjust memory quotas for a process**
-- **Log on as a service**
-
-Then give it ownership of its own directories:
+**Replace a process level token**, **Adjust memory quotas for a process**, and
+**Log on as a service**. Then give it its directories:
 
 ```powershell
 icacls C:\ProgramData\WinWings /grant "winwings:(OI)(CI)M"
 icacls D:\servers /grant "winwings:(OI)(CI)F"
 ```
 
-The daemon reports what it ended up with at boot:
+Create one account per concurrent server, each with the **Log on as a batch job**
+right, and list them under `system.account.accounts` with `isolation: pool`. A
+node can then run at most as many servers as you created accounts; assignment is
+by hash of the server UUID, so size the pool comfortably above your server count
+to avoid two servers sharing an account.
 
-```
-INFO  daemon security context  privileges=account=HOST\winwings can_launch_as_user=true
-INFO  running unprivileged with the token-assignment rights needed to isolate servers
-```
-
-If those privileges are missing and `isolation: pool` is configured, it refuses
-to start and names exactly what to grant, rather than failing at the first server.
-
-## 6. Install the service
-
-From an **elevated** prompt — the install needs elevation, the service itself
-must not have it:
+Install the service against the account you made:
 
 ```powershell
 C:\ProgramData\WinWings\wings.exe service install `
   --config C:\ProgramData\WinWings\config.yml `
   --account .\winwings --password <password>
-sc start winwings
 ```
 
-Check it (no elevation needed):
+The daemon reports what it ended up with at boot, and refuses to start if
+`isolation: pool` is set without those two privileges, rather than failing at the
+first server start:
 
-```powershell
-C:\ProgramData\WinWings\wings.exe service status
 ```
-
-`--allow-system` exists to override the refusal, and requires
-`system.account.allow_elevated: true` in the config to match. Only for a
-single-tenant node where every server is already trusted.
-
-## 7. Verify
-
-```powershell
-C:\ProgramData\WinWings\wings.exe diagnostics
-```
-
-Reports the Windows build, the runtime configuration, whether the worker binary
-was found, and which servers currently have a live worker.
-
-Watch the log while starting a server:
-
-```powershell
-Get-Content C:\ProgramData\WinWings\logs\wings.log -Wait -Tail 50
+INFO  daemon security context  privileges=account=HOST\winwings can_launch_as_user=true
+INFO  running unprivileged with the token-assignment rights needed to isolate servers
 ```
 
 ## Firewall
@@ -243,7 +270,7 @@ Constrain that per account:
 
 ```powershell
 New-NetFirewallRule -DisplayName "win-wings srv01" -Direction Inbound `
-  -Program C:\ProgramData\WinWings\volumes\<uuid>\server.exe -Action Allow
+  -Program D:\servers\<uuid>\data\server.exe -Action Allow
 ```
 
 Or set a default-deny inbound policy and allow only the allocated ports.
@@ -264,20 +291,32 @@ so restart servers after a protocol change.
 **`winwings-worker.exe was not found next to the daemon`** — both binaries must
 sit in the same directory.
 
-**`system.account.isolation is "pool" but no accounts are configured`** — see
-step 2, or set `isolation: shared` and accept that servers are not isolated.
+**Anything at all, before you read further** — run `wings.exe selftest` from an
+elevated prompt. It reproduces most of what follows and names the cause.
 
-**`refusing to run as ...`** — the daemon is LocalSystem, an Administrators
-member, or elevated. See step 5. Override with `system.account.allow_elevated`
-only if you accept the consequence.
+**`isolation is "managed" ... does not have administrator rights`** — the
+service is running as an account that cannot create the per-server accounts.
+Reinstall it with `wings.exe service install`, or switch to `pool` isolation and
+follow the appendix.
 
-**`isolation is "pool" but this account is missing ...`** — grant *Replace a
-process level token* and *Adjust memory quotas for a process* in `secpol.msc`,
-then restart the service.
+**`was missing SeAssignPrimaryTokenPrivilege ... restarted`** — the daemon
+granted itself the rights it needed. Windows applies account rights at logon, so
+`sc stop winwings && sc start winwings` and it will come up.
 
-**Server fails to start with a logon error** — the *server* account lacks *Log on
-as a batch job* (step 2), or the *daemon* account lacks the two privileges above
-(step 5).
+**`refusing to run as LocalSystem`** — reinstall the service with an account of
+its own. Override with `system.account.allow_elevated` only if you accept that a
+compromised daemon owns the host outright.
+
+**`the account "ww-..." already exists but was not created by this daemon`** — a
+name collision with an account of yours. Rename yours, or set
+`system.account.prefix` to something that does not collide.
+
+**`system.account.isolation is "pool" but no accounts are configured`** — see the
+appendix, or set `isolation: managed` and let the daemon create them.
+
+**Server fails to start with a logon error** — under `pool` isolation, the
+*server* account lacks *Log on as a batch job*; under `managed`, run `selftest`,
+which exercises exactly this.
 
 **Console is empty for a steamcmd-based server** — that class of process detects
 a non-console stdout and drops output. Set `pseudo_console` on the egg's Windows

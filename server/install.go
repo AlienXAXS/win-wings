@@ -17,6 +17,7 @@ import (
 
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
+	"github.com/pterodactyl/wings/internal/accounts"
 	"github.com/pterodactyl/wings/internal/jobobject"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/remote"
@@ -372,7 +373,10 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		"-File", ip.scriptPath(),
 	}
 
-	username, password := config.Get().System.Account.For(ip.Server.ID())
+	username, password, err := accounts.For(ip.Server.ID())
+	if err != nil {
+		return "", errors.WrapIf(err, "install: could not obtain the server's install account")
+	}
 
 	cfg := winproc.Config{
 		Argv: argv,
