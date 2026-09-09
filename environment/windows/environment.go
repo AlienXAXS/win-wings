@@ -44,6 +44,15 @@ type Metadata struct {
 	// The Panel-side Blueprint plugin supplies it.
 	Runtime string
 
+	// Startup replaces the egg's startup command, which is written for a Linux
+	// shell and generally cannot be made to work here. Empty means fall back to
+	// the Panel's STARTUP value.
+	//
+	// This is held here rather than folded into the server's environment
+	// variables because those are rebuilt from the Panel's configuration every
+	// time the server is synced, which would put the Linux command straight back.
+	Startup string
+
 	// Stop describes how the server should be brought down gracefully.
 	Stop remote.ProcessStopConfiguration
 
@@ -85,6 +94,12 @@ type Environment struct {
 	// time. See watchdog.go.
 	watchdog system.AtomicBool
 
+	// spawnMu serialises worker creation. Held across the whole check-then-spawn
+	// in connectOrSpawn, so two callers cannot both conclude there is no worker
+	// and start one each. It is separate from mu because it is held across a
+	// process launch, which mu must never be.
+	spawnMu sync.Mutex
+
 	// ctx bounds work that outlives a single call -- the reconnection watchdog
 	// being the only such work today. Cancelled when the server is destroyed, so
 	// that a watchdog does not keep talking about a server that no longer exists.
@@ -101,7 +116,7 @@ func New(id string, m *Metadata, c *environment.Configuration) (*Environment, er
 	if m == nil {
 		m = &Metadata{}
 	}
-	token, err := workerToken()
+	token, err := workerToken(id)
 	if err != nil {
 		return nil, err
 	}
@@ -119,13 +134,27 @@ func New(id string, m *Metadata, c *environment.Configuration) (*Environment, er
 	}, nil
 }
 
-// workerToken generates the shared secret that authenticates this daemon to the
-// server's worker over its control pipe.
+// workerToken returns the shared secret that authenticates this daemon to the
+// server's worker over its control pipe, reusing the one already on disk when
+// there is one.
+//
+// The token belongs to the server, not to a run of the daemon. A worker reads it
+// out of worker.json once at startup and holds it for its lifetime, and a worker
+// outlives the daemon by design — that is the whole point of the split. Minting a
+// fresh token on every boot therefore locked the daemon out of every worker that
+// was still running: the handshake was rejected, the daemon concluded no worker
+// was there, and it spawned a second one that could not have the pipe either. See
+// connect.
 //
 // The pipe's ACL is the primary control — only the daemon's own account can
-// connect at all. This is defence in depth against another process running as
-// that same account.
-func workerToken() (string, error) {
+// connect at all. The token is defence in depth against another process running
+// as that same account, and a persisted secret in a file only the daemon can read
+// serves that just as well as a fresh one.
+func workerToken(id string) (string, error) {
+	if c, err := worker.LoadConfig(config.Get().System.ServerWorkerConfig(id)); err == nil && c.Token != "" {
+		return c.Token, nil
+	}
+
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", errors.Wrap(err, "environment/windows: failed to generate worker token")
@@ -161,6 +190,21 @@ func (e *Environment) SetStopConfiguration(c remote.ProcessStopConfiguration) {
 func (e *Environment) SetRuntime(r string) {
 	e.mu.Lock()
 	e.meta.Runtime = r
+	e.mu.Unlock()
+}
+
+// SetStartup updates the Windows startup command override. Empty restores the
+// fallback to the Panel's own STARTUP value.
+func (e *Environment) SetStartup(s string) {
+	e.mu.Lock()
+	e.meta.Startup = s
+	e.mu.Unlock()
+}
+
+// SetPseudoConsole updates whether this egg's process gets a ConPTY.
+func (e *Environment) SetPseudoConsole(v bool) {
+	e.mu.Lock()
+	e.meta.PseudoConsole = v
 	e.mu.Unlock()
 }
 

@@ -215,7 +215,7 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 		Stop:    s.ProcessConfiguration().Stop,
 	}
 
-	if err := m.applyWindowsProfile(s, &meta); err != nil {
+	if err := s.applyWindowsProfile(&meta); err != nil {
 		return nil, err
 	}
 
@@ -292,10 +292,10 @@ func (m *Manager) init(ctx context.Context) error {
 // useful for bringing a node up against an unmodified Panel: those fields will
 // not actually work for most eggs, which is why production should turn the
 // setting on and fail closed instead.
-func (m *Manager) applyWindowsProfile(s *Server, meta *winenv.Metadata) error {
+func (s *Server) applyWindowsProfile(meta *winenv.Metadata) error {
 	required := config.Get().Runtime.RequireWindowsProfile
 
-	profile, err := m.client.GetWindowsProfile(s.Context(), s.ID())
+	profile, err := s.client.GetWindowsProfile(s.Context(), s.ID())
 	if err != nil {
 		if errors.Is(err, remote.ErrNoWindowsProfile) || errors.Is(err, remote.ErrNoWindowsProfileAPI) {
 			if required {
@@ -322,11 +322,20 @@ func (m *Manager) applyWindowsProfile(s *Server, meta *winenv.Metadata) error {
 
 	// A Windows-specific startup command replaces the Panel's, which is almost
 	// always Linux-shaped.
-	if profile.Startup != "" {
-		s.Lock()
-		s.cfg.Invocation = profile.Startup
-		s.Unlock()
-	}
+	//
+	// It goes into the metadata, not into s.cfg.Invocation. Invocation is the
+	// Panel's field: SyncWithConfiguration overwrites it with the egg's Linux
+	// command every time the server is synced, and the environment's copy of
+	// STARTUP is rebuilt from it. Anything written there survives only until the
+	// next Panel update.
+	meta.Startup = profile.Startup
+
+	s.Log().WithFields(log.Fields{
+		"runtime":          meta.Runtime,
+		"pseudo_console":   meta.PseudoConsole,
+		"startup_override": profile.Startup != "",
+		"stop_override":    profile.Stop != nil,
+	}).Debug("applied the egg's windows profile")
 
 	return nil
 }

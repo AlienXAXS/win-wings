@@ -32,10 +32,34 @@ func (s *Server) SyncWithEnvironment() {
 	})
 
 	// Keep the runtime selector and stop configuration in sync with the Panel.
+	//
+	// The egg's Windows profile has to be re-applied on top, and in this order.
+	// The Panel's values are the Linux ones — a container image as the runtime, a
+	// signal as the stop method, a shell command as the startup — so assigning
+	// them alone would silently revert every Windows override the moment anybody
+	// edited anything about the server in the Panel. The profile is fetched fresh
+	// rather than remembered so that an operator changing it does not have to
+	// restart the daemon to see the change.
 	if e, ok := s.Environment.(*winenv.Environment); ok {
 		s.Log().Debug("syncing runtime and stop configuration with the environment")
-		e.SetRuntime(cfg.Container.Image)
-		e.SetStopConfiguration(s.ProcessConfiguration().Stop)
+
+		meta := winenv.Metadata{
+			Runtime: cfg.Container.Image,
+			Stop:    s.ProcessConfiguration().Stop,
+		}
+		if err := s.applyWindowsProfile(&meta); err != nil {
+			// Never fatal here: a server that is already running must not be
+			// disturbed because the Panel plugin was briefly unreachable. The
+			// overrides already in place are left alone.
+			s.Log().WithField("error", err).
+				Warn("could not refresh this egg's windows profile; the settings already " +
+					"in effect were kept")
+		} else {
+			e.SetRuntime(meta.Runtime)
+			e.SetStopConfiguration(meta.Stop)
+			e.SetStartup(meta.Startup)
+			e.SetPseudoConsole(meta.PseudoConsole)
+		}
 	}
 
 	// If build limits are changed, environment variables also change. Plus, any modifications to

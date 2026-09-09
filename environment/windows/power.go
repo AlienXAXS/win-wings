@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"emperror.dev/errors"
+	"github.com/apex/log"
 
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
@@ -52,11 +53,13 @@ func resolveWorkerPath() (string, error) {
 	return workerPath, workerPathErr
 }
 
-// connect ensures a worker exists for this server and returns a live client.
+// connect attaches to the worker already supervising this server.
 //
-// A worker that is already running is reused, which is what lets the daemon
-// restart without disturbing servers: on the first connect after a restart the
-// worker reports the server still running and replays the console it buffered.
+// It never starts one. A worker outliving the daemon is the ordinary case, and
+// attaching to it is what lets the daemon restart without disturbing servers: the
+// worker reports the server still running and replays the console it buffered
+// while nobody was listening. A server with no worker is simply offline, and
+// saying so is this function's job — starting a process is Start's.
 func (e *Environment) connect(ctx context.Context) (*worker.Client, error) {
 	e.mu.RLock()
 	if c := e.client; c != nil {
@@ -66,14 +69,41 @@ func (e *Environment) connect(ctx context.Context) (*worker.Client, error) {
 	since := e.lastSeq
 	e.mu.RUnlock()
 
-	// Try an existing worker first.
 	c, err := worker.Dial(ctx, e.Id, e.token, since, e.handlers())
+	if err != nil {
+		return nil, err
+	}
+	e.adoptClient(c)
+	return c, nil
+}
+
+// connectOrSpawn attaches to this server's worker, starting one if there is none.
+//
+// Only a power action should reach this: everything else wants connect, which
+// reports an absent worker rather than manufacturing one.
+func (e *Environment) connectOrSpawn(ctx context.Context) (*worker.Client, error) {
+	// Serialised, because two callers racing here would each find no worker and
+	// each spawn one. Only one of them can own the control pipe; the other dies
+	// on a name collision, and which of the two that is comes down to timing.
+	e.spawnMu.Lock()
+	defer e.spawnMu.Unlock()
+
+	c, err := e.connect(ctx)
 	if err == nil {
-		e.adoptClient(c)
 		return c, nil
 	}
 
-	// No worker listening, so start one.
+	// A worker that is listening but will not talk to us is a fault to report,
+	// not a reason to start a second one. Named pipe names are exclusive: the
+	// duplicate would fail its own listen with "Access is denied" and exit,
+	// leaving the original in place and the daemon none the wiser.
+	if worker.PipeExists(e.Id) {
+		return nil, errors.WrapIf(err, "environment/windows: a worker for this server is "+
+			"already listening but would not accept a connection; it was left alone rather "+
+			"than starting a second one. Look in the instance directory's worker.log and "+
+			"worker-stderr.log, or stop the stray winwings-worker process for this server")
+	}
+
 	exe, perr := resolveWorkerPath()
 	if perr != nil {
 		return nil, perr
@@ -85,12 +115,19 @@ func (e *Environment) connect(ctx context.Context) (*worker.Client, error) {
 		return nil, err
 	}
 
-	c, err = worker.Dial(ctx, e.Id, e.token, since, e.handlers())
+	c, err = worker.Dial(ctx, e.Id, e.token, e.lastSequence(), e.handlers())
 	if err != nil {
 		return nil, errors.WrapIf(err, "environment/windows: failed to reach the worker after spawning it")
 	}
 	e.adoptClient(c)
 	return c, nil
+}
+
+// lastSequence is the last console sequence number this daemon has seen.
+func (e *Environment) lastSequence() uint64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastSeq
 }
 
 // adoptClient records a connected client and syncs state from its handshake.
@@ -220,7 +257,7 @@ func (e *Environment) Start(ctx context.Context) error {
 		}
 	}()
 
-	c, err := e.connect(ctx)
+	c, err := e.connectOrSpawn(ctx)
 	if err != nil {
 		sawError = true
 		return err
@@ -302,15 +339,40 @@ func (e *Environment) Start(ctx context.Context) error {
 // through cmd.exe, which would run partly user-controlled text with the server
 // account's full privileges. Shell operators are consequently not interpreted.
 func (e *Environment) resolveStartup(envVars []string) ([]string, error) {
-	invocation := ""
+	// The egg's own STARTUP, as the Panel sent it.
+	eggStartup := ""
 	for _, v := range envVars {
 		if strings.HasPrefix(v, "STARTUP=") {
-			invocation = strings.TrimPrefix(v, "STARTUP=")
+			eggStartup = strings.TrimPrefix(v, "STARTUP=")
 			break
 		}
 	}
+
+	// The Windows profile wins when it sets one. It is read from the metadata
+	// rather than from STARTUP because the environment variables are rebuilt from
+	// the Panel's configuration on every sync, and rebuilding them restores the
+	// Linux command.
+	e.mu.RLock()
+	invocation, source := e.meta.Startup, "windows profile"
+	e.mu.RUnlock()
+	if strings.TrimSpace(invocation) == "" {
+		invocation, source = eggStartup, "the egg's STARTUP variable"
+	}
+
 	if strings.TrimSpace(invocation) == "" {
 		return nil, errors.New("environment/windows: server has no startup command configured")
+	}
+
+	e.log().WithFields(log.Fields{
+		"source":   source,
+		"template": invocation,
+	}).Debug("resolving the startup command")
+
+	if source != "windows profile" && looksLikeShell(invocation) {
+		e.log().WithField("template", invocation).Warn(
+			"this server is starting with the egg's Linux startup command because its egg " +
+				"has no Windows startup override in the Panel plugin; the command uses shell " +
+				"syntax that is not interpreted here, so it will almost certainly fail")
 	}
 
 	lookup := make(map[string]string, len(envVars))
@@ -329,7 +391,31 @@ func (e *Environment) resolveStartup(envVars []string) ([]string, error) {
 		return nil, errors.WrapIf(err,
 			"environment/windows: could not parse the resolved startup command")
 	}
+
+	e.log().WithFields(log.Fields{
+		"source":   source,
+		"expanded": expanded,
+		"argc":     len(argv),
+	}).Debug("resolved the startup command")
+
 	return argv, nil
+}
+
+// looksLikeShell reports whether a startup line depends on shell features.
+//
+// Nothing here interprets them: the command is split with CommandLineToArgvW
+// rules and executed directly, deliberately, because running partly
+// user-controlled text through cmd.exe under the server's account is a shell
+// injection with a service behind it. A line built out of $(...) and pipes will
+// therefore be handed to CreateProcess verbatim and fail in a way that looks
+// nothing like the cause, so it is worth saying so out loud.
+func looksLikeShell(s string) bool {
+	for _, tok := range []string{"$(", "&&", "||", "|", ";", "`", "$'"} {
+		if strings.Contains(s, tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // account returns the local account credentials this server runs under.

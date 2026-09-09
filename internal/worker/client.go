@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -95,6 +96,30 @@ func SpawnWorker(ctx context.Context, exePath, instanceDir, uuid string, timeout
 	}
 
 	return WaitForPipe(ctx, uuid, timeout)
+}
+
+// PipeExists reports whether a worker is listening on a server's control pipe,
+// without regard to whether the caller could get anything useful out of it.
+//
+// This is the question to ask before spawning a worker, because pipe names are
+// exclusive and a second worker for the same server cannot start. Only
+// ERROR_FILE_NOT_FOUND means nothing is there: a pipe whose instances are all
+// busy, or whose ACL excludes the caller, is still very much a pipe, and
+// answering "no" to either of those would send the caller off to create a
+// duplicate that immediately dies.
+func PipeExists(uuid string) bool {
+	p, err := windows.UTF16PtrFromString(wire.PipeName(uuid))
+	if err != nil {
+		return false
+	}
+	// Opening the pipe consumes a listening instance for as long as the handle is
+	// held; the worker sees a connection that sends no handshake and drops it.
+	h, err := windows.CreateFile(p, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, 0, 0)
+	if err == nil {
+		_ = windows.CloseHandle(h)
+		return true
+	}
+	return !errors.Is(err, windows.ERROR_FILE_NOT_FOUND)
 }
 
 // WaitForPipe blocks until a worker's control pipe exists or the timeout passes.

@@ -5,6 +5,7 @@ package worker
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -151,4 +152,58 @@ func accountOrSelf(username string) string {
 		return "(the worker's own account -- no isolation)"
 	}
 	return username
+}
+
+// locateExecutable works out what argv[0] will actually run, and how it was
+// found, for diagnostics only.
+//
+// CreateProcess reports a missing executable and a malformed command line with
+// the same unhelpful error, and the two have entirely different causes: the
+// first is usually an install that put files somewhere unexpected, the second a
+// startup command written for a shell. Nothing here changes what is executed --
+// this only describes it.
+func locateExecutable(argv0, dir string, env []string) (string, string) {
+	if argv0 == "" {
+		return "", "argv is empty"
+	}
+
+	if filepath.IsAbs(argv0) {
+		return argv0, existsNote(argv0, "absolute path")
+	}
+
+	// A relative path is resolved against the working directory, which is the
+	// server's data directory rather than the daemon's.
+	if strings.ContainsAny(argv0, `\/`) {
+		full := filepath.Join(dir, argv0)
+		return full, existsNote(full, "relative to the server's data directory")
+	}
+
+	// A bare name goes through PATH, and the PATH that matters is the one being
+	// handed to the process, not this worker's own.
+	var pathValue string
+	for _, v := range env {
+		if k, val, ok := strings.Cut(v, "="); ok && strings.EqualFold(k, "PATH") {
+			pathValue = val
+		}
+	}
+	exts := []string{".exe", ".com", ".bat", ".cmd"}
+	for _, base := range append([]string{dir}, filepath.SplitList(pathValue)...) {
+		if base == "" {
+			continue
+		}
+		for _, ext := range append([]string{""}, exts...) {
+			candidate := filepath.Join(base, argv0+ext)
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				return candidate, "found on PATH"
+			}
+		}
+	}
+	return argv0, "not found on the PATH given to the process"
+}
+
+func existsNote(path, how string) string {
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		return how + ", exists"
+	}
+	return how + ", DOES NOT EXIST"
 }

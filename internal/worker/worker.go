@@ -11,6 +11,7 @@ package worker
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -135,6 +136,17 @@ func (w *Worker) Serve() error {
 		OutputBufferSize: 64 * 1024,
 	})
 	if err != nil {
+		// Pipe names are exclusive, and NPFS reports an attempt to create one that
+		// already exists as ERROR_ACCESS_DENIED rather than as a collision. Said
+		// plainly, that is a permissions problem and sends whoever reads it after
+		// ACLs and service accounts; it is almost always a second worker for a
+		// server that already has one.
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return fmt.Errorf("worker: listen on %s: %w. A worker for this server is "+
+				"probably already running and holding that pipe -- Windows reports a name "+
+				"collision as access denied. This worker is exiting; the existing one is "+
+				"untouched", wire.PipeName(w.cfg.UUID), err)
+		}
 		return fmt.Errorf("worker: listen on %s: %w", wire.PipeName(w.cfg.UUID), err)
 	}
 	defer l.Close()
@@ -444,6 +456,16 @@ func (w *Worker) Start(p wire.Start) error {
 		"account", accountOrSelf(p.Username),
 		"pseudo_console", p.PseudoConsole,
 		"env_vars", len(p.Env))
+
+	// The daemon resolved and split that command line; the worker only executes
+	// it. Saying where argv[0] actually points separates "the startup command is
+	// wrong" from "the startup command is right and the file is missing", which
+	// are otherwise the same CreateProcess error.
+	if len(p.Argv) > 0 {
+		resolved, note := locateExecutable(p.Argv[0], w.cfg.WorkingDir, p.Env)
+		w.Log(wire.LogDebug, "resolved the startup executable",
+			"argv0", p.Argv[0], "resolved", resolved, "how", note)
+	}
 
 	job, err := jobobject.Create()
 	if err != nil {
