@@ -103,16 +103,24 @@ Restrict the secrets directory to the daemon's account only:
 icacls C:\ProgramData\WinWings\secrets /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
 ```
 
-## 3. Lock down the instance directory
+## 3. Lock down the servers root
 
-The accounts running servers must not be able to write here:
+Set the top of the tree so server accounts cannot roam it:
 
 ```powershell
-icacls C:\ProgramData\WinWings\instances /inheritance:r `
+icacls D:\servers /inheritance:r `
   /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
 ```
 
-And the configuration file, which holds the Panel token:
+**Per-server permissions are applied by the daemon**, not by you. When a server
+is created it severs inheritance on `<uuid>\` and grants that server's assigned
+account exclusive write access to `<uuid>\data` only — so its `worker.json`,
+which holds the command its worker executes, stays out of its own reach.
+
+If the daemon lacks the rights to do that it logs a warning per server and
+carries on; the servers run, but they are not isolated from one another.
+
+Also protect the configuration file, which holds the Panel token:
 
 ```powershell
 icacls C:\ProgramData\WinWings\config.yml /inheritance:r `

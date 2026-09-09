@@ -14,7 +14,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +24,7 @@ import (
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/events"
+	"github.com/pterodactyl/wings/internal/winacl"
 	"github.com/pterodactyl/wings/internal/wire"
 	"github.com/pterodactyl/wings/internal/worker"
 	"github.com/pterodactyl/wings/remote"
@@ -175,23 +175,24 @@ func (e *Environment) SetLogCallback(f func([]byte)) {
 	e.logCallback = f
 }
 
-// InstanceDirectory is where this server's worker state lives.
+// ServerRoot is the server's top-level directory, which the daemon owns.
 //
-// This is deliberately outside the server's own data directory: it holds the
-// worker configuration and console log, and a server able to write there could
-// rewrite what the worker executes.
-func (e *Environment) InstanceDirectory() string {
-	return filepath.Join(config.Get().System.InstanceDirectory, e.Id)
+// It holds the worker configuration and console log alongside — not inside —
+// the server's own files. A server able to write here could rewrite what its
+// worker executes, so the sandbox is rooted one level down. See config/paths.go.
+func (e *Environment) ServerRoot() string {
+	return config.Get().System.ServerRoot(e.Id)
 }
 
-// workingDirectory is the server's data directory, which the server owns.
+// workingDirectory is the server's own files: the sandbox and SFTP root, and
+// what the Panel thinks of as /home/container.
 func (e *Environment) workingDirectory() string {
-	return filepath.Join(config.Get().System.Data, e.Id)
+	return config.Get().System.ServerData(e.Id)
 }
 
 // Exists reports whether the server's worker environment has been created.
 func (e *Environment) Exists() (bool, error) {
-	if _, err := os.Stat(filepath.Join(e.InstanceDirectory(), "worker.json")); err != nil {
+	if _, err := os.Stat(config.Get().System.ServerWorkerConfig(e.Id)); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
@@ -215,7 +216,7 @@ func (e *Environment) Create() error {
 		UUID:            e.Id,
 		Token:           e.token,
 		WorkingDir:      e.workingDirectory(),
-		LogPath:         filepath.Join(e.InstanceDirectory(), "console.log"),
+		LogPath:         cfg.System.ServerConsoleLog(e.Id),
 		ConsoleBacklog:  cfg.System.WebsocketLogCount * 2,
 		MaxLogSizeMB:    cfg.Runtime.Console.MaxSize,
 		MaxLogFiles:     cfg.Runtime.Console.MaxFiles,
@@ -225,10 +226,42 @@ func (e *Environment) Create() error {
 		wc.ConsoleBacklog = 256
 	}
 
-	if err := worker.WriteConfig(e.InstanceDirectory(), wc); err != nil {
+	if err := worker.WriteConfig(e.ServerRoot(), wc); err != nil {
 		return errors.WrapIf(err, "environment/windows: failed to write worker configuration")
 	}
+
+	if err := e.applyPermissions(); err != nil {
+		// Not fatal. A daemon without the rights to set ACLs can still run
+		// servers; they are simply not isolated from one another, which is the
+		// same position as shared isolation and is already warned about at boot.
+		e.log().WithField("error", err).
+			Warn("could not apply per-server permissions; this server's files are not " +
+				"isolated from other servers on this node")
+	}
+
 	return nil
+}
+
+// applyPermissions restricts the server's tree so its own account can write only
+// its data directory.
+//
+// The layout puts worker.json and the console log alongside the server's files
+// rather than inside them, but that only separates them if the ACL says so. A
+// server able to write worker.json could rewrite the command its worker
+// executes, which is arbitrary code execution as its own account.
+func (e *Environment) applyPermissions() error {
+	username, _ := e.account()
+	if username == "" {
+		// Shared isolation: there is no distinct account to grant, and the
+		// operator has already been told servers are not separated.
+		return nil
+	}
+
+	// Daemon-owned first, so the grant below cannot widen it.
+	if err := winacl.DenyAll(e.ServerRoot()); err != nil {
+		return err
+	}
+	return winacl.GrantExclusiveWrite(e.workingDirectory(), username)
 }
 
 // Destroy stops the server and removes its worker state.
@@ -249,8 +282,11 @@ func (e *Environment) Destroy() error {
 
 	e.SetState(environment.ProcessOfflineState)
 
-	if err := os.RemoveAll(e.InstanceDirectory()); err != nil && !os.IsNotExist(err) {
-		return errors.Wrap(err, "environment/windows: failed to remove instance directory")
+	// One tree per server, so removal is a single call. The server's files, its
+	// worker configuration, its console log and any private runtime all go
+	// together.
+	if err := os.RemoveAll(e.ServerRoot()); err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "environment/windows: failed to remove the server directory")
 	}
 	return nil
 }
@@ -308,7 +344,7 @@ func (e *Environment) InSituUpdate() error {
 
 // Readlog returns the last n lines of the server's console log.
 func (e *Environment) Readlog(lines int) ([]string, error) {
-	path := filepath.Join(e.InstanceDirectory(), "console.log")
+	path := config.Get().System.ServerConsoleLog(e.Id)
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

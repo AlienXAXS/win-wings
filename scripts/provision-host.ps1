@@ -163,7 +163,7 @@ Install-Pkg 'Microsoft.PowerShell' 'PowerShell 7, preferred for install scripts'
 if (-not $SkipDefender) {
     Write-Step "Windows Defender exclusions"
     if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-        foreach ($p in @("$DataRoot\volumes", "$DataRoot\tmp", "$DataRoot\backups")) {
+        foreach ($p in @("$DataRoot\servers", "$DataRoot\tmp", "$DataRoot\backups")) {
             Write-Host "  path: $p"
             if ($PSCmdlet.ShouldProcess($p, 'Defender path exclusion')) {
                 New-Item -ItemType Directory -Force $p | Out-Null
@@ -174,6 +174,31 @@ if (-not $SkipDefender) {
     } else {
         Write-Warn "Defender cmdlets unavailable; skipping"
     }
+}
+
+# --- Long paths --------------------------------------------------------------
+#
+# win-wings itself does not need this: its sandbox resolves paths one component
+# at a time against a directory handle, and MAX_PATH is a limit of the Win32
+# path-string layer rather than the kernel.
+#
+# Game servers do. A JVM writing a modpack's config tree uses ordinary Win32
+# paths and fails at 260 characters, which surfaces as a mod being unable to
+# write its own configuration — an error nobody attributes to the host.
+#
+# The daemon also sets this at boot, but doing it here means it is in place
+# before the first server ever starts.
+
+Write-Step "Long path support"
+$lpKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+$lp = (Get-ItemProperty $lpKey -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled
+if ($lp -eq 1) {
+    Write-Note "already enabled"
+} elseif ($PSCmdlet.ShouldProcess('LongPathsEnabled', 'set to 1')) {
+    Set-ItemProperty $lpKey -Name LongPathsEnabled -Value 1 -Type DWord
+    Write-Note "enabled; processes started from now on inherit it"
+    Write-Note "note: an executable must also declare longPathAware in its manifest,"
+    Write-Note "so this removes one cause of deep-path failures rather than all of them"
 }
 
 # --- Performance -------------------------------------------------------------

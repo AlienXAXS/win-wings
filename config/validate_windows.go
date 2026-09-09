@@ -30,7 +30,7 @@ func ValidateWindowsHost() error {
 	if err := validateAccounts(c.System.Account); err != nil {
 		return err
 	}
-	validateInstanceDirectorySeparation(c)
+	enableLongPaths()
 	warnIfPowerShellMissing()
 
 	return nil
@@ -102,33 +102,6 @@ func validateAccounts(a AccountConfiguration) error {
 	return nil
 }
 
-// validateInstanceDirectorySeparation warns if worker state is reachable from a
-// server's own files.
-//
-// The instance directory holds each server's resolved startup command. A server
-// able to write there could rewrite what its worker executes, which is arbitrary
-// code execution as whatever account it runs under.
-func validateInstanceDirectorySeparation(c *Configuration) {
-	data, err1 := filepath.Abs(c.System.Data)
-	inst, err2 := filepath.Abs(c.System.InstanceDirectory)
-	if err1 != nil || err2 != nil {
-		return
-	}
-
-	rel, err := filepath.Rel(data, inst)
-	if err != nil {
-		return
-	}
-	if !strings.HasPrefix(rel, "..") && rel != "." {
-		log.WithFields(log.Fields{
-			"data":      data,
-			"instances": inst,
-		}).Error("system.instance_directory is inside system.data, which servers can write to. " +
-			"A server could rewrite its own startup command and execute arbitrary code. " +
-			"Move it outside the server data tree")
-	}
-}
-
 // warnIfPowerShellMissing reports up front rather than at first install.
 func warnIfPowerShellMissing() {
 	candidates := []string{
@@ -151,9 +124,9 @@ func warnIfPowerShellMissing() {
 // configuration, for the boot log.
 func DescribeHost() string {
 	c := Get()
-	return fmt.Sprintf("isolation=%s accounts=%d data=%s instances=%s",
+	return fmt.Sprintf("isolation=%s accounts=%d servers=%s runtimes=%d",
 		c.System.Account.Isolation,
 		len(c.System.Account.Accounts),
 		c.System.Data,
-		c.System.InstanceDirectory)
+		len(c.Runtime.Runtimes))
 }

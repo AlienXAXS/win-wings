@@ -111,11 +111,9 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "      Root Directory:", cfg.System.RootDirectory)
 	fmt.Fprintln(output, "      Logs Directory:", cfg.System.LogDirectory)
-	fmt.Fprintln(output, "      Data Directory:", cfg.System.Data)
+	fmt.Fprintln(output, "    Servers Directory:", cfg.System.Data)
 	fmt.Fprintln(output, "   Archive Directory:", cfg.System.ArchiveDirectory)
 	fmt.Fprintln(output, "    Backup Directory:", cfg.System.BackupDirectory)
-	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "  Instance Directory:", cfg.System.InstanceDirectory)
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "           Isolation:", cfg.System.Account.Isolation)
 	fmt.Fprintln(output, "        Pool Accounts:", len(cfg.System.Account.Accounts))
@@ -137,7 +135,7 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	}
 
 	printHeader(output, "Running Workers")
-	if entries, err := os.ReadDir(cfg.System.InstanceDirectory); err == nil {
+	if entries, err := os.ReadDir(cfg.System.Data); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
@@ -150,7 +148,7 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 			fmt.Fprintf(output, "  %s  %s\n", e.Name(), state)
 		}
 	} else {
-		fmt.Fprintln(output, "  could not read the instance directory:", err)
+		fmt.Fprintln(output, "  could not read the servers directory:", err)
 	}
 
 	printHeader(output, "Latest Wings Logs")

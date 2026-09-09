@@ -121,21 +121,12 @@ type SystemConfiguration struct {
 	// Directory where logs for server installations and other wings events are logged.
 	LogDirectory string `default:"C:\\ProgramData\\WinWings\\logs" json:"-" yaml:"log_directory"`
 
-	// Directory where the server data is stored at. This tree is writable by the
-	// account server processes run under, and is the root exposed over SFTP.
+	// Data is the root beneath which every server gets its own directory tree.
 	//
-	// Nothing the daemon relies on may live here — see InstanceDirectory.
-	Data string `default:"C:\\ProgramData\\WinWings\\volumes" json:"-" yaml:"data"`
-
-	// InstanceDirectory holds per-server worker state: the worker's configuration,
-	// the resolved startup command, and its console log.
-	//
-	// This is deliberately a sibling of Data rather than a subdirectory of each
-	// server's files. The contents authorise what the worker executes, so a
-	// server able to write its own instance directory could rewrite its startup
-	// command and achieve arbitrary code execution as the account it runs under.
-	// The account running server processes must be denied write access here.
-	InstanceDirectory string `default:"C:\\ProgramData\\WinWings\\instances" json:"-" yaml:"instance_directory"`
+	// See paths.go for the layout. In short: <data>\<uuid>\data holds the
+	// server's own files and is the only part it can write; its worker
+	// configuration and console log are siblings of that, out of its reach.
+	Data string `default:"C:\\ProgramData\\WinWings\\servers" json:"-" yaml:"data"`
 
 	// Directory where server archives for transferring will be stored.
 	ArchiveDirectory string `default:"C:\\ProgramData\\WinWings\\archives" json:"-" yaml:"archive_directory"`
@@ -286,8 +277,8 @@ type Configuration struct {
 	// validate against it.
 	AuthenticationToken string `json:"token" yaml:"token"`
 
-	Api    ApiConfiguration    `json:"api" yaml:"api"`
-	System SystemConfiguration `json:"system" yaml:"system"`
+	Api     ApiConfiguration     `json:"api" yaml:"api"`
+	System  SystemConfiguration  `json:"system" yaml:"system"`
 	Runtime RuntimeConfiguration `json:"runtime" yaml:"runtime"`
 
 	// Defines internal throttling configurations for server processes to prevent
@@ -459,8 +450,6 @@ func WriteToDisk(c *Configuration) error {
 	return nil
 }
 
-
-
 // FromFile reads the configuration from the provided file and stores it in the
 // global singleton for this instance.
 func FromFile(path string) error {
@@ -534,14 +523,8 @@ func ConfigureDirectories() error {
 		return err
 	}
 
-	log.WithField("path", _config.System.InstanceDirectory).Debug("ensuring instance directory exists")
-	if err := os.MkdirAll(_config.System.InstanceDirectory, 0o700); err != nil {
-		return err
-	}
-
 	return nil
 }
-
 
 // GetStatesPath returns the location of the JSON file that tracks server states.
 func (sc *SystemConfiguration) GetStatesPath() string {
@@ -605,8 +588,6 @@ func systemTimezoneKeyName() (string, error) {
 	}
 	return name, nil
 }
-
-
 
 // Expand expands an input string by calling [os.ExpandEnv] to expand all
 // environment variables, then checks if the value is prefixed with `file://`

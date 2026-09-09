@@ -79,7 +79,7 @@ func (e *Environment) connect(ctx context.Context) (*worker.Client, error) {
 	if err := e.Create(); err != nil {
 		return nil, err
 	}
-	if err := worker.SpawnWorker(ctx, exe, e.InstanceDirectory(), e.Id, 20*time.Second); err != nil {
+	if err := worker.SpawnWorker(ctx, exe, e.ServerRoot(), e.Id, 20*time.Second); err != nil {
 		return nil, err
 	}
 

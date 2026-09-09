@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -196,7 +195,7 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 		return nil, errors.WithStackIf(err)
 	}
 
-	s.fs, err = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Egg.FileDenylist)
+	s.fs, err = filesystem.New(config.Get().System.ServerData(s.ID()), s.DiskSpace(), s.Config().Egg.FileDenylist)
 	if err != nil {
 		return nil, errors.WithStackIf(err)
 	}
