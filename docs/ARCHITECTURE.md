@@ -17,6 +17,7 @@ separately:
 | cgroup resource limits | Windows Job Objects (`internal/jobobject`) |
 | kill the container, kill the tree | `TerminateJobObject` |
 | filesystem isolation | one local account per server + NTFS ACLs, both daemon-managed |
+| published ports | per-server Windows Firewall rules |
 | network namespace, port publishing | **nothing** — see below |
 | console surviving daemon restart | a per-server worker process |
 | `/mnt/server` bind mount for installs | `$env:SERVER_DIR` |
@@ -125,11 +126,16 @@ in their Windows profile.
 
 Stated plainly, because operators need to know:
 
-**Port enforcement is gone.** Nothing binds ports on a server's behalf. The
+**Port binding is not enforced.** Nothing binds ports on a server's behalf. The
 allocation is passed through as `{{SERVER_IP}}`/`{{SERVER_PORT}}` and the server
-is trusted to honour it. A misconfigured or malicious server can bind any free
-port. Constraining that requires per-account firewall rules applied outside the
-daemon.
+is trusted to honour it, so a misconfigured or malicious server can bind any free
+port on the host — including one another server was allocated, if it gets there
+first.
+
+What the daemon does do is open exactly the allocated ports in the Windows
+Firewall and close them when the server is deleted, so anything else a server
+binds is unreachable from outside. That recovers most of what publishing a
+container port used to give, but not the binding guarantee itself.
 
 **The daemon is an administrator, by default and by design.** Under
 `isolation: managed` it creates a local account per server, grants it the batch

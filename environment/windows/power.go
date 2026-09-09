@@ -243,6 +243,12 @@ func (e *Environment) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Reapplied on every start rather than only at creation: the Panel can
+	// change a server's allocations while it is stopped, and a rule left over
+	// from the previous set would leave the new ports closed and the old ones
+	// open.
+	e.applyFirewall()
+
 	console := config.Get().Runtime.Console
 	username, password, err := e.account()
 	if err != nil {

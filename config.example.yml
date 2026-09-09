@@ -109,6 +109,33 @@ system:
     # cannot. See docs/DEPLOYMENT.md.
     allow_elevated: false
 
+  firewall:
+    # Open each server's allocated ports in the Windows Firewall.
+    #
+    # Docker coupled these: publishing a container port opened the path to it.
+    # Windows does not, so without this a server starts cleanly, reports healthy,
+    # and cannot be connected to.
+    #
+    # The daemon writes two inbound allow rules per server -- TCP and UDP, since
+    # a Pterodactyl allocation does not record which -- named
+    # win-wings-<uuid>-tcp / -udp, and removes them when the server is deleted.
+    #
+    # Turn this off if the host's firewall rules are managed centrally by group
+    # policy or a configuration management tool that would fight the daemon over
+    # them. Servers are then unreachable until something else opens their ports.
+    #
+    # Needs administrator rights, which managed isolation already requires. Under
+    # pool or shared isolation the daemon is unprivileged and reports at boot
+    # that the firewall cannot be managed.
+    manage: true
+
+    # At boot, remove rules belonging to servers this node no longer has.
+    #
+    # Rules outlive the daemon, so a server deleted while this node was stopped
+    # would otherwise leave its ports open indefinitely. Only rules carrying the
+    # daemon's own prefix are considered; anything else is left alone.
+    prune: true
+
   sftp:
     bind_address: 0.0.0.0
     bind_port: 2022

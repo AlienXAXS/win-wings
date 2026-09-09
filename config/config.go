@@ -148,6 +148,9 @@ type SystemConfiguration struct {
 	// Account configures the Windows account(s) that server processes run under.
 	Account AccountConfiguration `yaml:"account"`
 
+	// Firewall configures whether the daemon opens servers' allocated ports.
+	Firewall FirewallConfiguration `yaml:"firewall"`
+
 	// The amount of time in seconds that can elapse before a server's disk space calculation is
 	// considered stale and a re-check should occur. DANGER: setting this value too low can seriously
 	// impact system performance and cause massive I/O bottlenecks and high CPU usage for the Wings

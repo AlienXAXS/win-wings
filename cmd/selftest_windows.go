@@ -18,6 +18,7 @@ import (
 	"github.com/pterodactyl/wings/internal/jobobject"
 	"github.com/pterodactyl/wings/internal/winacl"
 	"github.com/pterodactyl/wings/internal/winenv"
+	"github.com/pterodactyl/wings/internal/winfw"
 	"github.com/pterodactyl/wings/internal/winpriv"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/internal/winuser"
@@ -337,6 +338,11 @@ func runSelfTest(keep bool) error {
 		runIsolationChecks(s, root, keep)
 	}
 
+	// -- Firewall ----------------------------------------------------------
+	fmt.Println()
+	fmt.Println("Firewall")
+	runFirewallChecks(s, state)
+
 	// -- Summary -----------------------------------------------------------
 	pass, fail, warn, skip := s.counts()
 	fmt.Println()
@@ -366,6 +372,64 @@ func runSelfTest(keep bool) error {
 type silentError struct{ error }
 
 func (e *silentError) Unwrap() error { return e.error }
+
+// runFirewallChecks proves the daemon can open and close a server's ports.
+//
+// Worth exercising for real rather than inferring from the daemon's privileges:
+// the rules are written by netsh, which fails differently for an unprivileged
+// account, a disabled firewall service and a group policy that forbids local
+// rules -- and only the first of those is visible from a token.
+func runFirewallChecks(s *suite, state winpriv.State) {
+	if !config.Get().System.Firewall.Manage {
+		s.warn("firewall management",
+			"system.firewall.manage is false; servers' ports must be opened by hand")
+		return
+	}
+
+	if !s.run("firewall is manageable", func() (string, error) {
+		if err := winfw.Available(); err != nil {
+			return "", err
+		}
+		return "rules can be created and removed", nil
+	}) {
+		s.skip("open and close a server's ports", "the firewall cannot be managed")
+		return
+	}
+
+	s.run("open and close a server's ports", func() (string, error) {
+		const uuid = "5e1f7e5f-0000-4000-8000-00000000fw01"
+		binding := winfw.Binding{"0.0.0.0": {28960, 28961}}
+
+		if err := winfw.Apply(uuid, "win-wings self test", binding); err != nil {
+			return "", err
+		}
+		defer winfw.Remove(uuid)
+
+		// Confirm through a different mechanism than the one that wrote them.
+		// netsh reporting success and the rule not existing is exactly the kind
+		// of thing this suite is for.
+		found, err := winfw.Exists(uuid)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return "", fmt.Errorf("netsh reported success but no rule named %s exists",
+				winfw.RuleName(uuid, "TCP"))
+		}
+
+		if err := winfw.Remove(uuid); err != nil {
+			return "", err
+		}
+		if found, err := winfw.Exists(uuid); err != nil {
+			return "", err
+		} else if found {
+			return "", fmt.Errorf("the rule %s still exists after removal; a deleted "+
+				"server would leave its ports open", winfw.RuleName(uuid, "TCP"))
+		}
+
+		return "created TCP and UDP rules for two ports, then removed them", nil
+	})
+}
 
 // runIsolationChecks provisions two throwaway servers and proves they are
 // separated.

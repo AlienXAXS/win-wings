@@ -26,6 +26,7 @@ import (
 	"github.com/pterodactyl/wings/events"
 	"github.com/pterodactyl/wings/internal/accounts"
 	"github.com/pterodactyl/wings/internal/winacl"
+	"github.com/pterodactyl/wings/internal/winfw"
 	"github.com/pterodactyl/wings/internal/wire"
 	"github.com/pterodactyl/wings/internal/worker"
 	"github.com/pterodactyl/wings/remote"
@@ -239,6 +240,8 @@ func (e *Environment) Create() error {
 		return errors.WrapIf(err, "environment/windows: failed to write worker configuration")
 	}
 
+	e.applyFirewall()
+
 	if err := e.applyPermissions(); err != nil {
 		// Not fatal. A daemon without the rights to set ACLs can still run
 		// servers; they are simply not isolated from one another, which is the
@@ -282,6 +285,31 @@ func (e *Environment) applyPermissions() error {
 	return winacl.GrantExclusiveWrite(e.tempDirectory(), username)
 }
 
+// applyFirewall opens this server's allocated ports.
+//
+// Failure is logged rather than returned. A firewall rule the daemon could not
+// write leaves the server unreachable, which is bad; refusing to create or start
+// the server at all would be worse, and an operator managing rules by hand or
+// through group policy is a supported configuration.
+func (e *Environment) applyFirewall() {
+	if !config.Get().System.Firewall.Manage {
+		return
+	}
+
+	allocations := e.Config().Allocations()
+	bindings := winfw.Binding(allocations.Bindings())
+	if err := winfw.Apply(e.Id, "", bindings); err != nil {
+		e.log().WithField("error", err).
+			Warn("could not open this server's ports in the Windows Firewall; the server " +
+				"will start but may be unreachable")
+		return
+	}
+	if len(bindings) > 0 {
+		e.log().WithField("allocations", len(bindings)).
+			Debug("opened this server's allocated ports in the Windows Firewall")
+	}
+}
+
 // Destroy stops the server and removes its worker state.
 func (e *Environment) Destroy() error {
 	e.mu.RLock()
@@ -315,6 +343,16 @@ func (e *Environment) Destroy() error {
 	// reason to keep it, and a failure here should not leave the tree behind.
 	if err := accounts.Release(e.Id); err != nil {
 		return errors.Wrap(err, "environment/windows: failed to remove the server's account")
+	}
+
+	// Firewall rules outlive the daemon, so a deleted server whose rules were
+	// left behind holds its ports open until somebody notices. Not fatal: the
+	// server is gone either way, and Prune at boot catches what this misses.
+	if config.Get().System.Firewall.Manage {
+		if err := winfw.Remove(e.Id); err != nil {
+			e.log().WithField("error", err).
+				Warn("could not close this server's ports in the Windows Firewall")
+		}
 	}
 	return nil
 }

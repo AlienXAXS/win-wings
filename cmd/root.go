@@ -222,6 +222,8 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 		}
 	}()
 
+	pruneFirewallRules(manager.All())
+
 	// Create a new workerpool that limits us to 4 servers being bootstrapped at a time
 	// on Wings. This allows us to ensure the environment exists, write configurations,
 	// and reboot processes without causing a slow-down due to sequential booting.

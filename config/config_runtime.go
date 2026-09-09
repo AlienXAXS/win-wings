@@ -122,6 +122,35 @@ type ConsoleConfiguration struct {
 	MaxFiles int `default:"1" json:"max_files" yaml:"max_files"`
 }
 
+// FirewallConfiguration controls whether the daemon opens a server's allocated
+// ports in the Windows Firewall.
+//
+// Docker coupled these: publishing a container port opened the path to it.
+// Windows does not, so without this a server starts cleanly, reports healthy,
+// and cannot be connected to.
+type FirewallConfiguration struct {
+	// Manage lets the daemon create an inbound allow rule per server covering
+	// exactly the allocations the Panel assigned, and remove it when the server
+	// is deleted.
+	//
+	// Turn this off if the host's firewall rules are managed centrally — by
+	// group policy, or by a configuration management tool that would fight the
+	// daemon over them. Servers are then unreachable until something else opens
+	// their ports.
+	//
+	// Requires administrator rights, which managed isolation already implies.
+	// Under pool or shared isolation the daemon is unprivileged by design, so
+	// this is reported as unavailable at boot rather than failing per server.
+	Manage bool `default:"true" json:"manage" yaml:"manage"`
+
+	// Prune removes rules belonging to servers this node no longer has, at boot.
+	//
+	// Firewall rules outlive the daemon, so a server deleted while its node was
+	// stopped leaves its ports open indefinitely. Only rules this daemon created
+	// are considered; anything not carrying its prefix is left alone.
+	Prune bool `default:"true" json:"prune" yaml:"prune"`
+}
+
 // AccountConfiguration describes the Windows account(s) that server processes
 // run under.
 //

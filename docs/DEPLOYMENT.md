@@ -263,17 +263,46 @@ INFO  running unprivileged with the token-assignment rights needed to isolate se
 
 ## Firewall
 
-Nothing publishes ports on a server's behalf. Under Docker, only the ports the
-Panel allocated were reachable; here a server binds whatever it asks for.
+**The daemon does this for you.** When a server is created or started it writes
+two inbound allow rules — TCP and UDP — covering exactly the ports the Panel
+allocated it, and removes them when the server is deleted. Rules belonging to
+servers this node no longer has are pruned at boot, which catches servers deleted
+while the node was stopped.
 
-Constrain that per account:
+The rules are named `win-wings-<uuid>-tcp` / `-udp`, and their description names
+the server, so an unexplained open port in `wf.msc` can be traced without opening
+the Panel:
 
 ```powershell
-New-NetFirewallRule -DisplayName "win-wings srv01" -Direction Inbound `
-  -Program D:\servers\<uuid>\data\server.exe -Action Allow
+Get-NetFirewallRule -DisplayName 'win-wings-*' | Select-Object DisplayName, Enabled
 ```
 
-Or set a default-deny inbound policy and allow only the allocated ports.
+Both protocols are opened for every allocation because a Pterodactyl allocation
+does not record which one it is — a Source engine server wants UDP for game
+traffic and TCP for RCON on the same number, and a Minecraft server wants TCP for
+the game and UDP for query. Opening one and guessing wrong produces a server that
+half works.
+
+This needs administrator rights, which managed isolation already requires. Under
+`pool` or `shared` isolation the daemon is unprivileged by design, so it reports
+at boot that the firewall cannot be managed and you open the ports yourself.
+
+To manage the rules elsewhere — group policy, or a configuration management tool
+that would fight the daemon over them — turn it off:
+
+```yaml
+system:
+  firewall:
+    manage: false
+    prune: true
+```
+
+Servers are then unreachable until something else opens their ports.
+
+Note that the daemon opens the allocated ports; it does not stop a server binding
+a different one. Nothing on Windows can, short of per-account outbound filtering.
+A server that binds an unallocated port will find it unreachable from outside,
+which is usually enough.
 
 ## Upgrading
 

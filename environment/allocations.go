@@ -31,8 +31,15 @@ type Allocations struct {
 // the server to honour them.
 //
 // That is a real reduction in what the daemon can guarantee. A misconfigured or
-// malicious server can bind any free port on the host. Constraining that needs
-// per-account Windows Firewall rules, applied outside this process.
+// malicious server can bind any free port on the host, and nothing here stops
+// it.
+//
+// What the daemon does do is open these ports, and only these, in the Windows
+// Firewall -- see internal/winfw. That makes the allocation reachable and leaves
+// anything else the server binds blocked from outside, which recovers most of
+// what publishing a container port used to provide. It is not the same
+// guarantee: a server can still bind a port another server was allocated, and
+// win the race.
 func (a *Allocations) Bindings() map[string][]int {
 	out := make(map[string][]int, len(a.Mappings))
 	for ip, ports := range a.Mappings {
