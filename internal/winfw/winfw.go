@@ -249,10 +249,52 @@ func joinInts(ports []int) string {
 // Worth spending characters on: somebody looking at an unexplained open port
 // should be able to tell which server owns it without consulting the Panel.
 func description(uuid, serverName string) string {
-	if serverName == "" {
+	name := sanitise(serverName)
+	if name == "" {
 		return "win-wings: allocations for server " + uuid
 	}
-	return fmt.Sprintf("win-wings: allocations for %q (%s)", serverName, uuid)
+	return fmt.Sprintf("win-wings: allocations for %s (%s)", name, uuid)
+}
+
+// maxDescriptionName bounds how much of a server's name goes into the rule.
+// Panel names are free text and netsh's own line handling gets unhappy long
+// before any documented limit.
+const maxDescriptionName = 96
+
+// sanitise makes a string safe to hand netsh as part of an argument value.
+//
+// netsh does not take its parameters from argv. It re-parses the raw command
+// line with its own tokenizer, so the quoting Go applies to make a value with
+// spaces into one argument is undone and then misread. A double quote inside the
+// value is the case that bites: netsh splits on it, loses track of which
+// parameter it is reading, and rejects the call with
+//
+//	A specified IP address or address keyword is not valid.
+//
+// which is about as far from the truth as an error message gets. Server names
+// come from the Panel, so this is reachable by naming a server with a quote in
+// it, and the symptom is a server that starts and cannot be connected to.
+//
+// Quotes become apostrophes rather than being dropped, so the name stays
+// readable in wf.msc, which is the only reason the name is here at all.
+func sanitise(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '"':
+			b.WriteRune('\'')
+		case r < 0x20 || r == 0x7f:
+			// Control characters, newlines included. A newline would let a name
+			// forge extra lines in anything that reads the rule back.
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(r)
+		}
+		if b.Len() >= maxDescriptionName {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // isNoRulesMatched reports whether netsh failed only because there was nothing

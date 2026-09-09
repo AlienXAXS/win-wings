@@ -131,3 +131,40 @@ func TestDescriptionNamesTheServer(t *testing.T) {
 		t.Errorf("description = %q, want it to name the server even with no display name", d)
 	}
 }
+
+func TestDescriptionHasNoQuotes(t *testing.T) {
+	// netsh re-parses the command line itself, so a double quote anywhere in an
+	// argument value derails its tokenizer and the call is rejected with an
+	// error about IP addresses. Server names come from the Panel.
+	for _, name := range []string{
+		`win-wings self test`,
+		`Bob's "Best" Server`,
+		"line\nbreak",
+		"tab\there",
+	} {
+		got := description("5e1f7e5f-0000-4000-8000-00000000fw01", name)
+		if strings.ContainsRune(got, '"') {
+			t.Errorf("description(%q) contains a double quote: %q", name, got)
+		}
+		for _, r := range got {
+			if r < 0x20 || r == 0x7f {
+				t.Errorf("description(%q) contains a control character %#U: %q", name, r, got)
+			}
+		}
+	}
+}
+
+func TestDescriptionWithoutAName(t *testing.T) {
+	const uuid = "5e1f7e5f-0000-4000-8000-00000000fw01"
+	// A name that sanitises away to nothing must fall back rather than produce
+	// "allocations for  (uuid)".
+	if got, want := description(uuid, "\x00\x01"), "win-wings: allocations for server "+uuid; got != want {
+		t.Errorf("description with an empty name = %q, want %q", got, want)
+	}
+}
+
+func TestSanitiseIsBounded(t *testing.T) {
+	if got := sanitise(strings.Repeat("a", 500)); len(got) > maxDescriptionName {
+		t.Errorf("sanitise returned %d bytes, want at most %d", len(got), maxDescriptionName)
+	}
+}
