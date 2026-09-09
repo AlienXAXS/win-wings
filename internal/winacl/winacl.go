@@ -143,3 +143,62 @@ func explicitAccess(sid *windows.SID, permissions windows.ACCESS_MASK, inheritan
 		},
 	}
 }
+
+// GrantReadFile lets one account read and execute a single file that sits in a
+// directory it is otherwise denied.
+//
+// Used for a server's staged install script. It lives beside worker.json in the
+// daemon-owned part of the server's tree, so that it survives the install and
+// can be read afterwards when diagnosing a failure — but the installer runs as
+// the server's own account, which DenyAll has just locked out of that directory.
+//
+// Read and execute only. A server able to *write* its install script could
+// rewrite what the next install runs, as the account that install runs under.
+func GrantReadFile(path, account string) error {
+	if account == "" {
+		return nil
+	}
+
+	sid, _, _, err := windows.LookupSID("", account)
+	if err != nil {
+		return fmt.Errorf("winacl: could not resolve account %q: %w", account, err)
+	}
+
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return fmt.Errorf("winacl: could not resolve SYSTEM: %w", err)
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return fmt.Errorf("winacl: could not resolve Administrators: %w", err)
+	}
+	self, err := currentUserSID()
+	if err != nil {
+		return err
+	}
+
+	// A file has nothing beneath it, so inheritance flags would be meaningless.
+	const noInherit = windows.NO_INHERITANCE
+
+	entries := []windows.EXPLICIT_ACCESS{
+		explicitAccess(sid, windows.GENERIC_READ|windows.GENERIC_EXECUTE, noInherit),
+		explicitAccess(system, windows.GENERIC_ALL, noInherit),
+		explicitAccess(admins, windows.GENERIC_ALL, noInherit),
+		explicitAccess(self, windows.GENERIC_ALL, noInherit),
+	}
+
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return fmt.Errorf("winacl: could not build an ACL for %q: %w", path, err)
+	}
+
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil,
+	); err != nil {
+		return fmt.Errorf("winacl: could not apply permissions to %q: %w", path, err)
+	}
+	return nil
+}

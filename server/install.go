@@ -19,6 +19,7 @@ import (
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/internal/accounts"
 	"github.com/pterodactyl/wings/internal/jobobject"
+	"github.com/pterodactyl/wings/internal/winacl"
 	"github.com/pterodactyl/wings/internal/winenv"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/remote"
@@ -192,23 +193,27 @@ func (ip *InstallationProcess) Run() error {
 	return execErr
 }
 
-// tempDir is where the installation script is staged.
+// scriptPath is where the installation script is staged.
 //
-// Deliberately not inside the server's own data directory: the script is
-// authored by an administrator and is what the installer executes, so a server
-// able to rewrite it before execution would gain arbitrary code execution.
-func (ip *InstallationProcess) tempDir() string {
-	return filepath.Join(config.Get().System.TmpDirectory, ip.Server.ID())
-}
-
+// Beside worker.json in the server's own directory rather than in a shared
+// temporary directory, for two reasons. It is the first thing anyone wants to
+// look at when an install fails, and a path under the server's UUID is where
+// they will look. And it is removed with the server, rather than depending on a
+// cleanup step that does not run when the daemon is killed mid-install.
+//
+// Deliberately NOT inside the server's data directory. The script is authored by
+// an administrator and is what the installer executes; a server able to rewrite
+// it before the next install would gain arbitrary code execution as its own
+// account. The server root is daemon-owned, and the installer is granted read
+// access to this one file.
 func (ip *InstallationProcess) scriptPath() string {
-	return filepath.Join(ip.tempDir(), "install.ps1")
+	return filepath.Join(config.Get().System.ServerRoot(ip.Server.ID()), "install.ps1")
 }
 
 // writeScriptToDisk stages the installation script.
 func (ip *InstallationProcess) writeScriptToDisk() error {
-	if err := os.MkdirAll(ip.tempDir(), 0o700); err != nil {
-		return errors.WithMessage(err, "could not create temporary directory for install process")
+	if err := os.MkdirAll(filepath.Dir(ip.scriptPath()), 0o700); err != nil {
+		return errors.WithMessage(err, "could not create the server directory for install process")
 	}
 
 	// PowerShell is content with either line ending, but normalising to CRLF
@@ -220,10 +225,26 @@ func (ip *InstallationProcess) writeScriptToDisk() error {
 	if err != nil {
 		return errors.WithMessage(err, "failed to write server installation script to disk")
 	}
-	defer f.Close()
 
 	if _, err := io.Copy(f, strings.NewReader(body)); err != nil {
+		_ = f.Close()
 		return err
+	}
+	// Closed before the ACL is rewritten: SetNamedSecurityInfo on a file this
+	// process still holds open works, but leaving it open past the point the
+	// installer needs to read it invites a sharing violation.
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	// The server root is daemon-owned, so the account the installer runs as
+	// cannot read anything in it. Open up this one file, read and execute only.
+	username, _, err := accounts.For(ip.Server.ID())
+	if err != nil {
+		return errors.WithMessage(err, "could not resolve the server's install account")
+	}
+	if err := winacl.GrantReadFile(ip.scriptPath(), username); err != nil {
+		return errors.WithMessage(err, "could not grant the install account access to the script")
 	}
 	return nil
 }
@@ -255,12 +276,6 @@ func (ip *InstallationProcess) GetLogPath() string {
 
 // AfterExecute writes the installation log.
 func (ip *InstallationProcess) AfterExecute(output string) error {
-	defer func() {
-		// The staged script may contain credentials substituted from egg
-		// variables, so it does not outlive the install.
-		_ = os.RemoveAll(ip.tempDir())
-	}()
-
 	f, err := os.OpenFile(ip.GetLogPath(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -443,10 +458,14 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return sb.String(), errors.WrapIf(waitErr, "install: failed waiting on installation script")
 	}
 	if code != 0 {
+		// Rendered rather than printed raw: a loader failure reports a decimal
+		// NTSTATUS that means nothing in that form, and points at the daemon's
+		// environment rather than at anything the egg author wrote.
+		explained := winproc.ExplainExitCode(code)
 		ip.Server.Events().Publish(DaemonMessageEvent,
-			fmt.Sprintf("Installation script exited with code %d.", code))
+			fmt.Sprintf("Installation script exited with code %s.", explained))
 		return sb.String(), errors.New(
-			fmt.Sprintf("install: installation script exited with a non-zero status: %d", code))
+			"install: installation script exited with a non-zero status: " + explained)
 	}
 
 	ip.Server.Events().Publish(DaemonMessageEvent, "Installation process completed.")

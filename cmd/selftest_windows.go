@@ -649,15 +649,39 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 		return "an active process limit stopped a second process from starting", nil
 	})
 
+	// PowerShell rather than cmd.exe, deliberately. Every install script is run
+	// by PowerShell, and it is far more demanding of its environment: it loads
+	// the .NET runtime, which fails outright without SystemRoot. A host where
+	// cmd.exe runs and PowerShell does not is a host where every server appears
+	// to work until the first install.
+	psPath := powershellPath()
+	if psPath == "" {
+		s.skip("run PowerShell as a server account", "no PowerShell interpreter")
+	} else {
+		s.run("run PowerShell as a server account", func() (string, error) {
+			code, out, err := runAs(a.token, a.dataDir,
+				[]string{psPath, "-NoProfile", "-NonInteractive", "-Command", "Write-Host ran-ok"},
+				jobobject.Limits{ProcessLimit: 16})
+			if err != nil {
+				return "", err
+			}
+			if code != 0 || !strings.Contains(out, "ran-ok") {
+				return "", fmt.Errorf("PowerShell did not run as %s: exit %s, output %q. "+
+					"Every egg install runs this way, so no server can be installed on this "+
+					"host until it does", a.user, winproc.ExplainExitCode(code), strings.TrimSpace(out))
+			}
+			return "PowerShell started, ran and exited cleanly", nil
+		})
+	}
+
 	s.run("job object memory limit", func() (string, error) {
 		// Allocate well past the cap and expect it to fail. cmd.exe cannot do
 		// this, so the allocation is done by PowerShell.
-		ps := powershellPath()
-		if ps == "" {
+		if psPath == "" {
 			return "", fmt.Errorf("no PowerShell interpreter to allocate with")
 		}
 		code, out, err := runAs(a.token, a.dataDir,
-			[]string{ps, "-NoProfile", "-NonInteractive", "-Command",
+			[]string{psPath, "-NoProfile", "-NonInteractive", "-Command",
 				"$b = New-Object byte[] 268435456; $b[0] = 1; exit 0"},
 			jobobject.Limits{MemoryBytes: 64 << 20, ProcessLimit: 16})
 		if err != nil {
@@ -667,8 +691,28 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 			return "", fmt.Errorf("a 256MB allocation succeeded inside a 64MB job; memory "+
 				"limits are not being enforced (output: %s)", strings.TrimSpace(out))
 		}
+		// A process that died in the loader also exits non-zero, and accepting
+		// that would report a working memory limit on a host where nothing runs
+		// at all. This check passed for exactly that reason once already.
+		if isLoaderFailure(code) {
+			return "", fmt.Errorf("PowerShell failed to start rather than failing to "+
+				"allocate: %s. The memory limit was not exercised",
+				winproc.ExplainExitCode(code))
+		}
 		return "a 256MB allocation was refused inside a 64MB job", nil
 	})
+}
+
+// isLoaderFailure reports whether an exit code means the process never ran.
+//
+// Any check that expects a process to fail has to distinguish the failure it
+// asked for from the process not starting, or it passes on a broken host.
+func isLoaderFailure(code uint32) bool {
+	switch code {
+	case 0xC0000142, 0xC0000135, 0xC0000139, 0xC000007B:
+		return true
+	}
+	return false
 }
 
 // runAs launches a command as another account inside a Job Object and returns
