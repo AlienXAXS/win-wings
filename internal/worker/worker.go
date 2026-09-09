@@ -152,6 +152,7 @@ func (w *Worker) Serve() error {
 	defer l.Close()
 
 	go func() {
+		defer w.guard("closing the control pipe on shutdown", nil)
 		<-w.shutdown
 		_ = l.Close()
 	}()
@@ -219,10 +220,13 @@ func (c *conn) push(b []byte) {
 }
 
 func (w *Worker) handleConn(nc net.Conn) {
+	defer w.guard("handling a control connection", nil)
+
 	c := &conn{Conn: nc, w: w, send: make(chan []byte, 256), done: make(chan struct{})}
 	defer c.close()
 
 	go func() {
+		defer w.guard("writing to a control connection", nil)
 		for {
 			select {
 			case b := <-c.send:
@@ -329,7 +333,26 @@ func (c *conn) replyError(id uint64, msg string) {
 	c.reply(wire.TypeError, id, wire.Error{Message: msg})
 }
 
+// dispatch handles one request from a connected daemon.
+//
+// A panic here is answered rather than propagated: the daemon gets an error for
+// the request it made, the worker keeps running, and the server it is
+// supervising is not affected by a bug in handling something unrelated to it.
 func (w *Worker) dispatch(c *conn, env wire.Envelope) {
+	// Registered first so it runs last, once guard has turned any panic into an
+	// error worth sending back.
+	var failure error
+	defer func() {
+		if failure != nil {
+			c.replyError(env.ID, failure.Error())
+		}
+	}()
+	defer w.guard("handling a "+string(env.Type)+" request", &failure)
+
+	w.handle(c, env)
+}
+
+func (w *Worker) handle(c *conn, env wire.Envelope) {
 	switch env.Type {
 	case wire.TypePing:
 		c.reply(wire.TypePong, env.ID, struct{}{})
@@ -424,6 +447,14 @@ func (w *Worker) broadcast(t wire.MessageType, payload any) {
 
 func (w *Worker) setState(s wire.ProcessState) {
 	w.mu.Lock()
+	if w.state == s {
+		// Not a transition. Repeating it would have the daemon announce a state
+		// change to the Panel that did not happen, and the failure paths here
+		// deliberately overlap -- a panic barrier setting "offline" over an error
+		// path that already did should be silent.
+		w.mu.Unlock()
+		return
+	}
 	w.state = s
 	pid := w.pidLocked()
 	w.mu.Unlock()
@@ -438,7 +469,28 @@ func (w *Worker) pidLocked() int {
 }
 
 // Start launches the server process.
-func (w *Worker) Start(p wire.Start) error {
+//
+// Nothing a start request can do may be allowed to reach the top of the
+// goroutine handling it. The worker holds this server's job object, and that job
+// carries KILL_ON_JOB_CLOSE, so a panic here does not merely fail the request --
+// it exits the worker, releases the job, and terminates a server that may have
+// been running quite happily before the request arrived. A bad request must cost
+// the request, not the server.
+func (w *Worker) Start(p wire.Start) (err error) {
+	// Registered first so that it runs last, after guard below has turned any
+	// panic into an error. The ordinary failure paths already report offline;
+	// setState ignores a repeat.
+	defer func() {
+		if err != nil {
+			w.setState(wire.StateOffline)
+		}
+	}()
+	defer w.guard("starting the server process", &err)
+
+	return w.start(p)
+}
+
+func (w *Worker) start(p wire.Start) error {
 	w.mu.Lock()
 	if w.proc != nil {
 		w.mu.Unlock()
@@ -541,6 +593,8 @@ func (w *Worker) Start(p wire.Start) error {
 // pumpConsole streams process output into the console buffer and out to every
 // connected daemon.
 func (w *Worker) pumpConsole(proc *winproc.Process) {
+	defer w.guard("pumping console output", nil)
+
 	buf := make([]byte, 32*1024)
 	out := proc.Output()
 	for {
@@ -556,6 +610,17 @@ func (w *Worker) pumpConsole(proc *winproc.Process) {
 }
 
 func (w *Worker) watchExit(proc *winproc.Process, job *jobobject.Job) {
+	// The only thing that reports the process ending. If it dies quietly the
+	// daemon waits forever on a server that has already gone, so a recovery here
+	// has to say so even though it does not know the exit code.
+	var failure error
+	defer func() {
+		if failure != nil {
+			w.setState(wire.StateOffline)
+		}
+	}()
+	defer w.guard("watching for the server process to exit", &failure)
+
 	code, err := proc.Wait()
 	if err != nil {
 		code = 0
@@ -584,6 +649,8 @@ func (w *Worker) watchExit(proc *winproc.Process, job *jobobject.Job) {
 }
 
 func (w *Worker) watchJobEvents(job *jobobject.Job) {
+	defer w.guard("watching job object events", nil)
+
 	for ev := range job.Events() {
 		if ev.MemoryLimitHit {
 			w.mu.Lock()
@@ -594,6 +661,8 @@ func (w *Worker) watchJobEvents(job *jobobject.Job) {
 }
 
 func (w *Worker) pumpStats() {
+	defer w.guard("sampling resource usage", nil)
+
 	t := time.NewTicker(time.Duration(w.cfg.StatsIntervalMS) * time.Millisecond)
 	defer t.Stop()
 
@@ -675,6 +744,8 @@ func (w *Worker) UpdateLimits(l wire.Limits) error {
 // sharing the console and is widely unhandled; terminating the job is immediate
 // and unclean. Each step is given the full timeout before the next is tried.
 func (w *Worker) Stop(p wire.Stop) {
+	defer w.guard("stopping the server process", nil)
+
 	w.mu.Lock()
 	proc := w.proc
 	if proc == nil {
@@ -744,6 +815,8 @@ func (w *Worker) Terminate() error {
 
 // Shutdown stops the process and ends the worker.
 func (w *Worker) Shutdown() {
+	defer w.guard("shutting the worker down", nil)
+
 	w.mu.Lock()
 	running := w.proc != nil
 	w.mu.Unlock()

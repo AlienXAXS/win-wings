@@ -111,7 +111,7 @@ func ParseCommandLine(cmdline string) ([]string, error) {
 }
 
 // Start launches the process and places it in job before it runs.
-func Start(cfg Config, job *jobobject.Job) (p *Process, err error) {
+func Start(cfg Config, job *jobobject.Job) (_ *Process, err error) {
 	if len(cfg.Argv) == 0 {
 		return nil, fmt.Errorf("winproc: no command specified")
 	}
@@ -119,10 +119,15 @@ func Start(cfg Config, job *jobobject.Job) (p *Process, err error) {
 		return nil, fmt.Errorf("winproc: no working directory specified")
 	}
 
-	p = &Process{}
+	// proc is a local, not the returned value. Every failure path below returns
+	// nil for the process, and when this was a named return that nil was assigned
+	// before the deferred cleanup ran -- so the cleanup dereferenced a nil pointer
+	// and panicked, replacing the actual failure with a crash in the worker. The
+	// first result is blank so that it cannot be assigned again by accident.
+	proc := &Process{}
 	defer func() {
 		if err != nil {
-			p.closeAll()
+			proc.closeAll()
 		}
 	}()
 
@@ -160,7 +165,7 @@ func Start(cfg Config, job *jobobject.Job) (p *Process, err error) {
 	var attrList *windows.ProcThreadAttributeListContainer
 
 	if cfg.PseudoConsole {
-		if err = p.setupPseudoConsole(cfg, &si); err != nil {
+		if err = proc.setupPseudoConsole(cfg, &si); err != nil {
 			return nil, err
 		}
 		attrList, err = windows.NewProcThreadAttributeList(1)
@@ -171,15 +176,15 @@ func Start(cfg Config, job *jobobject.Job) (p *Process, err error) {
 
 		if err = attrList.Update(
 			procThreadAttributePseudoConsole,
-			unsafe.Pointer(&p.pty),
-			unsafe.Sizeof(p.pty),
+			unsafe.Pointer(&proc.pty),
+			unsafe.Sizeof(proc.pty),
 		); err != nil {
 			return nil, fmt.Errorf("winproc: attach pseudo console: %w", err)
 		}
 		si.ProcThreadAttributeList = attrList.List()
 		flags |= windows.EXTENDED_STARTUPINFO_PRESENT
 	} else {
-		if err = p.setupPipes(&si); err != nil {
+		if err = proc.setupPipes(&si); err != nil {
 			return nil, err
 		}
 		// A distinct process group is what makes GenerateConsoleCtrlEvent able to
@@ -230,29 +235,29 @@ func Start(cfg Config, job *jobobject.Job) (p *Process, err error) {
 		return nil, fmt.Errorf("winproc: create process %q: %w", cfg.Argv[0], err)
 	}
 
-	p.Pid = int(pi.ProcessId)
-	p.proc = pi.Process
-	p.thread = pi.Thread
+	proc.Pid = int(pi.ProcessId)
+	proc.proc = pi.Process
+	proc.thread = pi.Thread
 
 	// Release the ends of the pipes now owned by the child, so that reads see
 	// EOF when the child exits rather than hanging on our own dangling handle.
-	p.releaseChildHandles()
+	proc.releaseChildHandles()
 
 	// Assign before resuming: this is the window in which a process could
 	// otherwise spawn children outside the job.
 	if job != nil {
-		if err = job.Assign(p.proc); err != nil {
-			_ = windows.TerminateProcess(p.proc, 1)
+		if err = job.Assign(proc.proc); err != nil {
+			_ = windows.TerminateProcess(proc.proc, 1)
 			return nil, err
 		}
 	}
 
-	if _, err = windows.ResumeThread(p.thread); err != nil {
-		_ = windows.TerminateProcess(p.proc, 1)
+	if _, err = windows.ResumeThread(proc.thread); err != nil {
+		_ = windows.TerminateProcess(proc.proc, 1)
 		return nil, fmt.Errorf("winproc: resume: %w", err)
 	}
 
-	return p, nil
+	return proc, nil
 }
 
 // setupPseudoConsole creates a ConPTY and the pipes feeding it.
@@ -339,6 +344,9 @@ func (p *Process) setupPipes(si *windows.StartupInfoEx) error {
 
 // releaseChildHandles closes the pipe ends the child now owns.
 func (p *Process) releaseChildHandles() {
+	if p == nil {
+		return
+	}
 	for _, h := range p.ptyClosers {
 		_ = windows.CloseHandle(h)
 	}
@@ -449,6 +457,12 @@ func (p *Process) Close() error {
 }
 
 func (p *Process) closeAll() {
+	// Nil-tolerant on purpose. This runs from deferred cleanup on failure paths,
+	// where it is the last thing standing between a start error and a panic that
+	// takes the worker -- and the whole server -- down with it.
+	if p == nil {
+		return
+	}
 	p.releaseChildHandles()
 
 	if p.stdin != nil {
