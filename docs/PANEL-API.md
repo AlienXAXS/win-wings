@@ -183,9 +183,80 @@ Environment differences from a Linux egg:
 | runs as root in a container | runs as the server's unprivileged account |
 | container image provides the runtime | `$env:INSTALL_RUNTIME` names what is expected; the script must verify it |
 
-Every standard egg variable is present, plus `SERVER_DIR` and `INSTALL_RUNTIME`.
-A non-zero exit fails the installation and the output is written to
+Every standard egg variable is present, plus `SERVER_DIR`, `INSTALL_RUNTIME`
+and `STEAMCMD_DIR`. A non-zero exit fails the installation and the output is written to
 `<log_directory>\install\<uuid>.log` as well as streamed to the Panel.
+
+**Do not pipe a native command's output through PowerShell.** The script is given
+a pseudo console so that installers stream their progress live
+(`console.install_pseudo_console`, on by default). Writing
+
+```powershell
+& $exe @args | ForEach-Object { Write-Host $_ }   # and likewise 2>&1 |, *> file
+```
+
+hands the child a pipe instead, and a C runtime that finds stdout is not a
+character device switches from line buffering to full buffering. Nothing is
+lost, but a twenty-minute steamcmd download shows an empty console and then
+every progress line at once at the end — which is indistinguishable from an
+install that has hung. Call the executable and let it write to the console:
+
+```powershell
+& $exe @args
+$rc = $LASTEXITCODE
+```
+
+If the script needs to react to something the installer said, prefer the state it
+leaves on disk over matching its output; that is what
+`docs\eggs\starrupture\install.ps1` does for steamcmd's install-path refusal.
+
+## Steam games: updating before start
+
+The Linux steamcmd images did one more thing in their entrypoint: when
+`AUTO_UPDATE` was set they ran `steamcmd +app_update` before handing over to
+the startup command. The daemon does the same, without any profile field.
+
+A server is treated as a Steam game when `steamcmd.exe` exists in
+`$env:STEAMCMD_DIR`, a per-server directory the daemon creates beside the
+server's files and hands to both the install script and the server. The
+install script should download and extract steamcmd there:
+
+```powershell
+Invoke-WebRequest https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip -OutFile "$env:TEMP\steamcmd.zip"
+Expand-Archive "$env:TEMP\steamcmd.zip" -DestinationPath $env:STEAMCMD_DIR -Force
+& "$env:STEAMCMD_DIR\steamcmd.exe" +force_install_dir $env:SERVER_DIR +login anonymous +app_update $env:SRCDS_APPID validate +quit
+```
+
+The Linux layout, steamcmd inside the server directory updating that same
+directory, does **not** work on Windows. Steamcmd refuses to install into its
+own folder or any folder above it, prints "Please set the game install path to
+something other than the Steam install folder", ignores the directive and
+installs into its own folder instead. A steamcmd found at `steamcmd\steamcmd.exe`
+inside the server directory is therefore ignored, with a warning in the daemon
+log saying where it should be.
+
+For a Steam server, every start first runs an update when `AUTO_UPDATE` is
+`1`, `true`, `yes` or `on`. The update runs under the server's account, inside its job, with
+its output on the console, and the server starts once it finishes. A stop
+request during the update kills the update and the server does not start.
+
+The command is built from the variables the standard steamcmd eggs already
+define:
+
+| Variable | Use |
+|---|---|
+| `AUTO_UPDATE` | Whether to update at all. Anything but a positive value skips it. |
+| `SRCDS_APPID`, or `STEAM_APPID` | The app to update. Required; without one the update is skipped and logged. |
+| `STEAM_USER`, `STEAM_PASS`, `STEAM_AUTH` | Login. Empty or `anonymous` logs in anonymously. |
+| `SRCDS_BETAID`, `SRCDS_BETAPASS` | Beta branch and its password. |
+| `INSTALL_FLAGS` | Extra `app_update` arguments, split with command-line rules. |
+| `VALIDATE` | Adds `validate` when positive. |
+
+The install directory is always the server's own directory. `WINDOWS_INSTALL`
+is ignored: steamcmd on Windows fetches the Windows build by default.
+
+Passwords are masked in the daemon's log and the worker does not log the
+command at all, but steamcmd itself may echo what it is given.
 
 ## Suggested plugin behaviour
 

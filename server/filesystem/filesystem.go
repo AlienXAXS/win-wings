@@ -57,7 +57,6 @@ func (fs *Filesystem) Path() string {
 	return fs.winFS.BasePath()
 }
 
-
 // ReadDir reads directory entries.
 func (fs *Filesystem) ReadDir(path string) ([]winfs.DirEntry, error) {
 	return fs.winFS.ReadDir(path)
@@ -448,19 +447,22 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 		}
 		var m *mimetype.MIME
 		if e.Type().IsRegular() {
-			// TODO: I should probably find a better way to do this.
-			eO := e.(interface {
-				Open() (winfs.File, error)
-			})
-			f, err := eO.Open()
+			// Entries come from os.File.ReadDir and carry no handle of their
+			// own, so the file is reopened by path through the sandbox. A
+			// file another process holds without read sharing cannot be
+			// opened; that is common on Windows for a running server's logs
+			// and must not fail the whole listing, so it just keeps the
+			// generic type.
+			f, err := fs.winFS.Open(filepath.Join(p, e.Name()))
 			if err != nil {
-				return Stat{}, err
+				log.WithField("path", filepath.Join(p, e.Name())).WithField("error", err).Debug("could not open file for mimetype detection")
+			} else {
+				m, err = mimetype.DetectReader(f)
+				if err != nil {
+					log.Error(err.Error())
+				}
+				_ = f.Close()
 			}
-			m, err = mimetype.DetectReader(f)
-			if err != nil {
-				log.Error(err.Error())
-			}
-			_ = f.Close()
 		}
 
 		st := Stat{FileInfo: info, Mimetype: d}

@@ -692,6 +692,33 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 			return "PowerShell started, ran and exited cleanly", nil
 		})
 
+		// The install path with console.install_pseudo_console on, which is the
+		// default. The pseudo console belongs to the daemon and the process
+		// attaching to it belongs to the server, so this crosses an account
+		// boundary that nothing else here does.
+		//
+		// Its failure mode is not a message: the child dies in the loader with
+		// 0xC0000142 having run none of its own code, or runs and emits nothing.
+		// Both look, from the Panel, like an install that did nothing.
+		s.run("PowerShell in a pseudo console as a server account", func() (string, error) {
+			code, out, err := runAsWith(a.token, a.dataDir,
+				[]string{psPath, "-NoProfile", "-NonInteractive", "-Command", "Write-Host pty-ok"},
+				jobobject.Limits{ProcessLimit: 16}, true)
+			if err != nil {
+				return "", err
+			}
+			if code != 0 || !strings.Contains(out, "pty-ok") {
+				return "", fmt.Errorf("PowerShell did not run under a pseudo console as %s: "+
+					"exit %s, %d bytes of output. Installs will show an empty console on "+
+					"this host; set console.install_pseudo_console to false to fall back to "+
+					"pipes, which buffer the output but do not lose it",
+					a.user, winproc.ExplainExitCode(code), len(out))
+			}
+			// The output is a VT stream rather than lines, which is what the
+			// setting costs and what an operator reading the install log will see.
+			return fmt.Sprintf("a pseudo console carried %d bytes of VT output back", len(out)), nil
+		})
+
 		// A logon token is not a logon session as far as the registry is
 		// concerned. Unless the account's profile has been loaded there is no
 		// HKEY_CURRENT_USER, and the first thing that notices is .NET resolving
@@ -754,6 +781,16 @@ func runIsolationChecks(s *suite, root string, keep bool) {
 // runAs launches a command as another account inside a Job Object and returns
 // its exit code and combined output.
 func runAs(token windows.Token, dir string, argv []string, limits jobobject.Limits) (uint32, string, error) {
+	return runAsWith(token, dir, argv, limits, false)
+}
+
+// runAsWith is runAs with a say in whether the process gets a pseudo console.
+//
+// Worth testing separately because a pseudo console is created by the daemon and
+// serviced by a console host running as the daemon's account, while the child
+// that attaches to it runs as the server's. Nothing else in the daemon crosses an
+// account boundary in that direction.
+func runAsWith(token windows.Token, dir string, argv []string, limits jobobject.Limits, pty bool) (uint32, string, error) {
 	job, err := jobobject.Create()
 	if err != nil {
 		return 0, "", fmt.Errorf("could not create a job object: %w", err)
@@ -765,10 +802,11 @@ func runAs(token windows.Token, dir string, argv []string, limits jobobject.Limi
 	}
 
 	proc, err := winproc.Start(winproc.Config{
-		Argv:  argv,
-		Dir:   dir,
-		Env:   minimalEnvironment(dir),
-		Token: token,
+		Argv:          argv,
+		Dir:           dir,
+		Env:           minimalEnvironment(dir),
+		Token:         token,
+		PseudoConsole: pty,
 	}, job)
 	if err != nil {
 		return 0, "", fmt.Errorf("could not start the process: %w", err)

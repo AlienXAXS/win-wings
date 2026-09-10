@@ -225,11 +225,9 @@ runtime:
     # runtime full-buffers stdout and a twenty-minute download shows nothing
     # until it finishes; a ConPTY gives live output instead.
     #
-    # Off by default because ConPTY is not yet dependable: on some hosts the
-    # child dies in the loader with 0xC0000142 having run nothing, while the
-    # same command runs fine on pipes. If you turn this on and installs start
-    # failing instantly with that code, this is why.
-    install_pseudo_console: false
+    # The cost is that the install log holds a VT stream — escape sequences and
+    # cursor movement — rather than clean lines. Turn it off to get plain text.
+    install_pseudo_console: true
     columns: 200
     rows: 50
     max_size: 5

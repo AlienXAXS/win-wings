@@ -97,11 +97,6 @@ running across a daemon disconnect and reconnect.
 
 ## Known gaps
 
-- **ConPTY is unverified.** Implemented and matching Microsoft's documented
-  sample, but it produced no output on the development machine. Plain pipes work
-  fully and are the default; only steamcmd-class processes need ConPTY. Run
-  `go test ./internal/winproc -run TestConPTY -v` on a real interactive Windows
-  host — the diagnostic records everything already ruled out.
 - **Port allocations are not enforced.** Nothing binds on a server's behalf.
   Use per-account firewall rules.
 - **Network statistics need an administrative daemon, or a one-time grant.**

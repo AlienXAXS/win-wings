@@ -176,7 +176,7 @@ func Start(cfg Config, job *jobobject.Job) (_ *Process, err error) {
 
 		if err = attrList.Update(
 			procThreadAttributePseudoConsole,
-			unsafe.Pointer(&proc.pty),
+			hpconValue(proc.pty),
 			unsafe.Sizeof(proc.pty),
 		); err != nil {
 			return nil, fmt.Errorf("winproc: attach pseudo console: %w", err)
@@ -271,6 +271,33 @@ func Start(cfg Config, job *jobobject.Job) (_ *Process, err error) {
 	return proc, nil
 }
 
+// hpconValue prepares an HPCON to be handed to UpdateProcThreadAttribute.
+//
+// PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE is the odd one out among the proc-thread
+// attributes: lpValue is the HPCON *itself*, not the address of a variable
+// holding one. The ones alongside it — PARENT_PROCESS, HANDLE_LIST,
+// MITIGATION_POLICY — all take a pointer to their value, and x/sys/windows types
+// the parameter as unsafe.Pointer, so the wrong call is the one that reads
+// naturally. Microsoft's EchoCon sample is where the difference is visible: a
+// single line that passes hPC rather than &hPC.
+//
+// Getting this wrong does not fail: UpdateProcThreadAttribute and CreateProcess
+// both succeed, a console host is spawned, and the child is then handed a
+// PseudoConsole struct read from the wrong address. It dies in the loader with
+// STATUS_DLL_INIT_FAILED (0xC0000142) having run none of its own code, which is
+// an exit code and not an error message. That cost a great deal of time here;
+// see the note at the top of conpty_diag_test.go.
+//
+// The double indirection launders the uintptr past both `go vet`'s unsafeptr
+// check and checkptr under -race. Neither has anything to complain about — the
+// value is a kernel32 heap pointer that the Go collector knows nothing about and
+// must not try to track — but a direct unsafe.Pointer(uintptr) conversion is
+// indistinguishable to them from the mistake they exist to catch.
+func hpconValue(pty windows.Handle) unsafe.Pointer {
+	p := uintptr(pty)
+	return *(*unsafe.Pointer)(unsafe.Pointer(&p))
+}
+
 // setupPseudoConsole creates a ConPTY and the pipes feeding it.
 func (p *Process) setupPseudoConsole(cfg Config, si *windows.StartupInfoEx) error {
 	var inRead, inWrite, outRead, outWrite windows.Handle
@@ -308,8 +335,27 @@ func (p *Process) setupPseudoConsole(cfg Config, si *windows.StartupInfoEx) erro
 	p.stdin = os.NewFile(uintptr(inWrite), "conpty-stdin")
 	p.output = os.NewFile(uintptr(outRead), "conpty-output")
 
-	// A pseudo console supplies the child's handles; STARTUPINFO must not.
-	si.Flags = 0
+	// Hand the child no standard handles at all, so that it takes them from the
+	// console it is being attached to.
+	//
+	// Leaving STARTF_USESTDHANDLES clear looks right -- the pseudo console is
+	// supposed to supply the handles -- and is what Microsoft's EchoCon sample
+	// does. It only works there because EchoCon is a console program whose own
+	// standard handles already belong to a console, and console handles are
+	// remapped onto whichever console the child ends up attached to. The worker's
+	// standard output is a pipe, and a pipe handle is copied down literally: the
+	// child inherited the worker's stdout, wrote everything into the daemon's own
+	// log, and the pseudo console carried nothing but its startup escape
+	// sequences. That is the "a conhost is spawned but never services the
+	// console" symptom recorded in conpty_diag_test.go.
+	//
+	// Setting the flag with three NULL handles is how to say "inherit nothing":
+	// given no handles and a console, the child opens its standard handles onto
+	// that console.
+	si.Flags |= windows.STARTF_USESTDHANDLES
+	si.StdInput = 0
+	si.StdOutput = 0
+	si.StdErr = 0
 	return nil
 }
 

@@ -258,6 +258,11 @@ func (e *Environment) workingDirectory() string {
 	return config.Get().System.ServerData(e.Id)
 }
 
+// steamcmdDirectory is where this server's steamcmd lives, when it has one.
+func (e *Environment) steamcmdDirectory() string {
+	return config.Get().System.ServerSteamcmd(e.Id)
+}
+
 // Exists reports whether the server's worker environment has been created.
 func (e *Environment) Exists() (bool, error) {
 	if _, err := os.Stat(config.Get().System.ServerWorkerConfig(e.Id)); err != nil {
@@ -281,6 +286,9 @@ func (e *Environment) Create() error {
 	}
 	if err := os.MkdirAll(e.tempDirectory(), 0o700); err != nil {
 		return errors.Wrap(err, "environment/windows: failed to create server temp directory")
+	}
+	if err := os.MkdirAll(e.steamcmdDirectory(), 0o700); err != nil {
+		return errors.Wrap(err, "environment/windows: failed to create server steamcmd directory")
 	}
 
 	wc := worker.Config{
@@ -342,8 +350,13 @@ func (e *Environment) applyPermissions() error {
 	}
 	// TEMP sits outside the sandbox so that scratch files are not charged
 	// against the user's quota or copied into backups, which means it needs a
-	// grant of its own -- DenyAll above has just taken it away.
-	return winacl.GrantExclusiveWrite(e.tempDirectory(), username)
+	// grant of its own -- DenyAll above has just taken it away. The same goes
+	// for steamcmd, which must sit outside the directory it updates and which
+	// updates itself in place.
+	if err := winacl.GrantExclusiveWrite(e.tempDirectory(), username); err != nil {
+		return err
+	}
+	return winacl.GrantExclusiveWrite(e.steamcmdDirectory(), username)
 }
 
 // applyFirewall opens this server's allocated ports.

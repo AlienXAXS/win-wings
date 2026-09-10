@@ -77,20 +77,26 @@ New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 #   Please set the game install path to something other than the Steam install
 #   folder
 #
-# It does not fail when it says this. It ignores +force_install_dir, installs
-# into its own steamapps\common instead, reports "Success! App ... fully
-# installed", and exits 0 - so the game lands one directory too deep, no
-# appmanifest appears where anything looks for it, and the server has nothing to
-# run. That is what makes this worth a paragraph rather than a line.
+# It does not reliably fail when it says this. It ignores +force_install_dir,
+# installs into its own steamapps\common instead, reports "Success! App ... fully
+# installed", and exits 7 or even 0 - so the game lands one directory too deep,
+# no appmanifest appears where anything looks for it, and the server has nothing
+# to run. That is what makes this worth a paragraph rather than a line.
 #
 # On Linux none of this arises: steamcmd.sh roots itself at ~/Steam regardless of
 # where the script lives, so /mnt/server/steamcmd with an install path of
 # /mnt/server is fine. This is a genuine platform difference, not a port mistake.
 #
-# The scratch directory is the right home for it: outside the install path, on
-# the same volume so committing a download is a move rather than a copy, writable
-# by this account, and removed along with the server.
-$SteamCmdDir = Join-Path $TempDir 'steamcmd'
+# win-wings therefore gives every server a steamcmd directory of its own, beside
+# its files rather than inside them, and hands it to this script as
+# STEAMCMD_DIR. It is outside the install path, on the same volume so committing
+# a download is a move rather than a copy, writable by this account, outside the
+# disk quota and backups, and removed along with the server.
+#
+# It is also where the daemon looks before every start: with AUTO_UPDATE set it
+# runs steamcmd from there to update the server, so leaving it anywhere else
+# means the server never updates.
+$SteamCmdDir = $env:STEAMCMD_DIR
 
 function Write-Section {
     param([string]$Text)
@@ -163,6 +169,10 @@ if (-not $env:SRCDS_APPID) {
     Write-Host 'SRCDS_APPID is not set. Aborting.'
     exit 1
 }
+if (-not $SteamCmdDir) {
+    Write-Host 'STEAMCMD_DIR is not set. This script must be run by win-wings. Aborting.'
+    exit 1
+}
 
 # Asserted rather than assumed, because the failure it prevents is silent: an
 # install that reports success and puts the game somewhere nothing looks.
@@ -174,7 +184,7 @@ if ($cmdFull.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase) 
     Write-Host "  install path = $rootFull"
     Write-Host "  steamcmd     = $cmdFull"
     Write-Host 'SteamCMD refuses that and silently installs to the wrong place instead.'
-    Write-Host 'This means TEMP is not pointing outside SERVER_DIR. Aborting.'
+    Write-Host 'This means STEAMCMD_DIR is not pointing outside SERVER_DIR. Aborting.'
     exit 1
 }
 
@@ -258,6 +268,7 @@ Set-Location $SteamCmdDir
 Write-Host '----- environment -----'
 Write-Host "  SERVER_DIR      = $SteamRoot"
 Write-Host "  TEMP            = $TempDir"
+Write-Host "  STEAMCMD_DIR    = $SteamCmdDir"
 Write-Host "  PowerShell      = $($PSVersionTable.PSVersion)"
 Write-Host "  Running as      = $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 Write-Host '------------------------'
@@ -342,33 +353,53 @@ for ($i = 1; $i -le $Retries; $i++) {
     }
     Write-Host "Running command:`n  steamcmd.exe $($shown -join ' ')"
 
-    # Captured as well as shown, so the refusal below can be detected. SteamCMD
-    # reports it on stdout and still exits 0, so the exit code alone cannot.
+    # Deliberately NOT piped, captured, or redirected.
     #
-    # ErrorActionPreference is relaxed across this one call. With it set to Stop,
-    # a native command whose stderr is redirected into the pipeline raises
-    # NativeCommandError on the first line it writes there, which would abort the
-    # install on output steamcmd considers routine.
+    # `& $exe | ForEach-Object { ... }` and `2>&1 |` both hand the child a pipe
+    # for its stdout, and two things then conspire. The C runtime switches from
+    # line buffering to full buffering the moment stdout is not a character
+    # device; and PowerShell splits a native command's output on newlines, while
+    # steamcmd reports download progress with bare carriage returns, so it never
+    # sees a line to emit until the whole update finishes. A twenty-minute
+    # download shows nothing at all and then dumps every progress line at once --
+    # which is exactly what it looks like when output is broken.
+    #
+    # No amount of work on the daemon's side fixes that: win-wings gives this
+    # script a pseudo console, and a pipeline stops it dead at PowerShell so
+    # steamcmd never sees one. Left alone, steamcmd inherits the console it was
+    # given and its progress arrives as it happens.
+    #
+    # ErrorActionPreference is relaxed across this one call because PowerShell
+    # 7.4 turns a native command's non-zero exit into a terminating error when it
+    # is Stop -- which would abort on the first failed attempt, the one thing the
+    # retry loop exists to survive.
     $previousEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $steamOut = & $SteamCmdExe @steamArgs 2>&1 | ForEach-Object {
-            Write-Host $_
-            $_
-        }
+        & $SteamCmdExe @steamArgs
         $steamRc = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousEAP
     }
 
-    if ($steamOut -match 'install path to something other than the Steam install folder') {
+    # Detected from the filesystem rather than from steamcmd's console output.
+    #
+    # This used to match the message "install path to something other than the
+    # Steam install folder", which meant capturing the output and paying for it
+    # in the buffering above. The state it leaves behind is the better signal in
+    # any case: having refused the install path, steamcmd ignores
+    # +force_install_dir and installs into its own library, which puts an
+    # appmanifest here that has no business existing.
+    $strayManifest = Join-Path $SteamCmdDir "steamapps\appmanifest_$AppId.acf"
+    if (Test-Path $strayManifest) {
         Write-Host ''
-        Write-Host 'SteamCMD refused the install path because it contains the SteamCMD'
-        Write-Host 'directory, and installed to its own library instead. The game is not'
-        Write-Host 'where the server expects it. Aborting rather than retrying, because'
-        Write-Host 'every attempt will do the same thing.'
-        Write-Host "  install path = $SteamRoot"
-        Write-Host "  steamcmd     = $SteamCmdDir"
+        Write-Host 'SteamCMD ignored the install path and installed into its own library'
+        Write-Host 'instead, which is what it does when the install path contains the'
+        Write-Host 'SteamCMD directory. The game is not where the server expects it.'
+        Write-Host 'Aborting rather than retrying, because every attempt will do the same.'
+        Write-Host "  install path   = $SteamRoot"
+        Write-Host "  steamcmd       = $SteamCmdDir"
+        Write-Host "  stray manifest = $strayManifest"
         exit 1
     }
 

@@ -129,6 +129,7 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	fmt.Fprintln(output, "         CPU Hard Cap:", cfg.Runtime.CpuHardCap)
 	fmt.Fprintln(output, "        Bind Address:", cfg.Runtime.BindAddress)
 	fmt.Fprintln(output, "  Console PseudoConsole:", cfg.Runtime.Console.PseudoConsole)
+	fmt.Fprintln(output, "  Install PseudoConsole:", cfg.Runtime.Console.InstallPseudoConsole)
 	if exe, err := os.Executable(); err == nil {
 		wp := filepath.Join(filepath.Dir(exe), "winwings-worker.exe")
 		if _, err := os.Stat(wp); err == nil {

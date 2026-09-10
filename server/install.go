@@ -263,6 +263,10 @@ func (ip *InstallationProcess) BeforeExecute() error {
 	if err := os.MkdirAll(config.Get().System.ServerTemp(ip.Server.ID()), 0o700); err != nil {
 		return errors.WithMessage(err, "failed to create server temp directory for install process")
 	}
+	// And where a Steam egg's script is told to put steamcmd.
+	if err := os.MkdirAll(config.Get().System.ServerSteamcmd(ip.Server.ID()), 0o700); err != nil {
+		return errors.WithMessage(err, "failed to create server steamcmd directory for install process")
+	}
 	if err := os.MkdirAll(filepath.Dir(ip.GetLogPath()), 0o700); err != nil {
 		return errors.WithMessage(err, "failed to create install log directory")
 	}
@@ -327,8 +331,9 @@ func (ip *InstallationProcess) installEnvironment() []string {
 	// place this matters most: it downloads, unpacks and runs vendor tooling,
 	// none of which survives a missing SystemRoot or TEMP.
 	env = winenv.Merge(winenv.Base(winenv.Paths{
-		Data: ip.Server.Filesystem().Path(),
-		Temp: config.Get().System.ServerTemp(ip.Server.ID()),
+		Data:     ip.Server.Filesystem().Path(),
+		Temp:     config.Get().System.ServerTemp(ip.Server.ID()),
+		Steamcmd: config.Get().System.ServerSteamcmd(ip.Server.ID()),
 	}), env)
 
 	// Put the requested runtime ahead of the host PATH, and export RUNTIME_PATH,

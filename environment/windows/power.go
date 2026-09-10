@@ -291,7 +291,11 @@ func (e *Environment) Start(ctx context.Context) error {
 	// the base, the process gets no SystemRoot, no TEMP and no PATH, because a
 	// non-NULL environment block replaces the parent's rather than extending it.
 	envVars := winenv.Merge(
-		winenv.Base(winenv.Paths{Data: e.workingDirectory(), Temp: e.tempDirectory()}),
+		winenv.Base(winenv.Paths{
+			Data:     e.workingDirectory(),
+			Temp:     e.tempDirectory(),
+			Steamcmd: e.steamcmdDirectory(),
+		}),
 		e.Config().EnvironmentVariables(),
 	)
 	envVars = config.Get().Runtime.ApplyRuntime(runtimeName, envVars)
@@ -318,6 +322,7 @@ func (e *Environment) Start(ctx context.Context) error {
 	if err := c.Start(wire.Start{
 		Argv:          argv,
 		Env:           envVars,
+		PreStart:      e.resolvePreStart(envVars),
 		Limits:        e.Config().Limits().AsJobLimits(),
 		PseudoConsole: pty || console.PseudoConsole,
 		Cols:          console.Columns,
@@ -384,12 +389,7 @@ func (e *Environment) resolveStartup(envVars []string) ([]string, error) {
 				"syntax that is not interpreted here, so it will almost certainly fail")
 	}
 
-	lookup := make(map[string]string, len(envVars))
-	for _, v := range envVars {
-		if k, val, ok := strings.Cut(v, "="); ok {
-			lookup[k] = val
-		}
-	}
+	lookup := envLookup(envVars)
 
 	// Normalise {{VAR}} to ${VAR}, matching what the yolks entrypoint did.
 	expanded := strings.NewReplacer("{{", "${", "}}", "}").Replace(invocation)

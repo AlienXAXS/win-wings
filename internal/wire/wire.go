@@ -194,6 +194,16 @@ type Start struct {
 	// Env is the process environment as "KEY=VALUE" strings.
 	Env []string `json:"env"`
 
+	// PreStart is a command to run to completion before Argv, in the same job,
+	// directory, environment and account, with its output on the console. Empty
+	// means none.
+	//
+	// This is what the Docker image's entrypoint did ahead of the startup
+	// command -- a steamcmd update, typically. The daemon decides whether one is
+	// due and what it is; the worker only runs it. It may carry credentials, so
+	// the worker does not log it.
+	PreStart []string `json:"pre_start,omitempty"`
+
 	// Limits to apply to the Job Object before the process runs.
 	Limits Limits `json:"limits"`
 

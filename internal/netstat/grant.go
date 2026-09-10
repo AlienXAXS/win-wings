@@ -25,14 +25,24 @@ import (
 var procEventAccessControl = modadvapi32.NewProc("EventAccessControl")
 
 const (
-	// eventSecurityAddDACL appends an ACE rather than replacing the list.
-	eventSecurityAddDACL = 1
+	// eventSecurityAddDACL appends an ACE to the provider's access list.
+	//
+	// EVENTSECURITYOPERATION numbers SetDACL 0, SetSACL 1, AddDACL 2 and
+	// AddSACL 3. Passing 1 here by mistake asks for the audit list to be
+	// replaced, which opens the provider object for ACCESS_SYSTEM_SECURITY and
+	// fails with ERROR_PRIVILEGE_NOT_HELD even from an elevated prompt.
+	eventSecurityAddDACL = 2
 	// tracelogGUIDEnable is the right to enable the provider into a session.
 	tracelogGUIDEnable = 0x0080
 )
 
 // GrantEnable allows an account to enable the kernel-network provider. Must be
 // called elevated; the change persists in the registry across reboots.
+//
+// No privilege handling is needed here: EventAccessControl enables
+// SeSecurityPrivilege on its own token for the duration of the call, and a
+// DACL change only needs WRITE_DAC on the provider, which the default
+// descriptor grants to administrators.
 func GrantEnable(sid *windows.SID) error {
 	guid := kernelNetworkProvider
 	r, _, _ := procEventAccessControl.Call(

@@ -359,15 +359,22 @@ which exercises exactly this.
 
 **Console is empty for a steamcmd-based server** — that class of process detects
 a non-console stdout and drops output. Set `pseudo_console` on the egg's Windows
-profile. Note that ConPTY is currently unverified; see
-`internal/winproc/conpty_diag_test.go`.
+profile.
 
 **Install output arrives all at once at the end** — the installer's C runtime
 switches stdout from line to full buffering when it is not a console, so the
-output is not lost, just delivered in blocks. Setting
-`console.install_pseudo_console` gives live output instead, at the cost of
-ConPTY, which is not yet dependable: on some hosts the child dies in the loader
-with `0xC0000142` having run nothing. It is off by default for that reason.
+output is not lost, just delivered in blocks. Two things cause it. First,
+`console.install_pseudo_console` being off in `config.yml`; it is on by default.
+Second, and more often, the egg's own script piping the installer:
+`& $exe @args | ForEach-Object { ... }` or `2>&1 |` gives the child a pipe and
+the pseudo console stops at PowerShell. See "How install scripts differ" in
+`docs\PANEL-API.md`. The symptom of the second is telling — the script's own
+`Write-Host` lines appear live while the installer's do not.
+
+**Install output is full of escape sequences** — expected with
+`console.install_pseudo_console` on. A pseudo console emits a VT stream, which
+the Panel renders and a text editor does not. Set it to `false` for plain text,
+at the cost of the buffering above.
 
 **Server starts but ignores its port** — expected. Nothing enforces the
 allocation; the egg's startup command must pass `{{SERVER_IP}}` and

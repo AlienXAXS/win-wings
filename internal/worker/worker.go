@@ -547,15 +547,6 @@ func (w *Worker) start(p wire.Start) error {
 		return err
 	}
 
-	cfg := winproc.Config{
-		Argv:          p.Argv,
-		Dir:           w.cfg.WorkingDir,
-		Env:           p.Env,
-		PseudoConsole: p.PseudoConsole,
-		Cols:          p.Cols,
-		Rows:          p.Rows,
-	}
-
 	var token windows.Token
 	if p.Username != "" {
 		token, err = winproc.LogonUser(p.Username, p.Password)
@@ -566,27 +557,148 @@ func (w *Worker) start(p wire.Start) error {
 			w.setState(wire.StateOffline)
 			return err
 		}
-		cfg.Token = token
 	}
 
-	proc, err := winproc.Start(cfg, job)
+	if len(p.PreStart) > 0 {
+		return w.startPreStart(p, job, token)
+	}
+	return w.launchServer(p, job, token, false)
+}
+
+// processConfig is the launch configuration for one of a run's processes. The
+// pre-start command and the server share everything but the command line.
+func (w *Worker) processConfig(p wire.Start, argv []string, token windows.Token) winproc.Config {
+	return winproc.Config{
+		Argv:          argv,
+		Dir:           w.cfg.WorkingDir,
+		Env:           p.Env,
+		Token:         token,
+		PseudoConsole: p.PseudoConsole,
+		Cols:          p.Cols,
+		Rows:          p.Rows,
+	}
+}
+
+// startPreStart runs the pre-start command -- a steamcmd update, typically --
+// and arranges for the server to be launched once it finishes.
+//
+// It returns as soon as the command is running. The daemon is waiting on this
+// request over the worker's only connection, and an update can take minutes,
+// so it cannot be waited for here: the run stays in the starting state and
+// watchPreStart carries it forward.
+func (w *Worker) startPreStart(p wire.Start, job *jobobject.Job, token windows.Token) error {
+	proc, err := winproc.Start(w.processConfig(p, p.PreStart, token), job)
 	if err != nil {
-		w.Log(wire.LogError, "could not start the server process",
-			"executable", p.Argv[0], "error", err)
+		w.Log(wire.LogError, "could not start the pre-start command",
+			"executable", p.PreStart[0], "error", err)
+		w.abandon(job, token)
+		return err
+	}
+
+	// Held as the current process so that a stop request during the update
+	// finds something to act on.
+	w.mu.Lock()
+	w.job = job
+	w.proc = proc
+	w.startedAt = time.Now()
+	w.exitCode = 0
+	w.memoryLimitHit = false
+	w.terminated = false
+	w.stopping = false
+	w.mu.Unlock()
+
+	// Only the executable: the arguments may carry an account password.
+	w.Log(wire.LogInfo, "running the pre-start command; the server starts when it finishes",
+		"executable", p.PreStart[0], "pid", proc.Pid)
+
+	go w.pumpConsole(proc)
+	go w.watchPreStart(p, proc, job, token)
+	return nil
+}
+
+// watchPreStart waits for the pre-start command and then launches the server,
+// unless a stop arrived in the meantime.
+func (w *Worker) watchPreStart(p wire.Start, proc *winproc.Process, job *jobobject.Job, token windows.Token) {
+	// A panic here would otherwise leave the worker holding a process that has
+	// gone, refusing every later start as "already running".
+	var failure error
+	defer func() {
+		if failure != nil {
+			if token != 0 {
+				_ = token.Close()
+			}
+			w.finish(proc, job, 0)
+		}
+	}()
+	defer w.guard("waiting for the pre-start command", &failure)
+
+	code, err := proc.Wait()
+	if err != nil {
+		code = 0
+	}
+
+	w.mu.Lock()
+	interrupted := w.stopping || w.terminated
+	w.mu.Unlock()
+	if interrupted {
+		w.Log(wire.LogInfo, "the pre-start command was interrupted by a stop request; "+
+			"the server will not be started", "exit_code", code)
 		if token != 0 {
 			_ = token.Close()
 		}
-		_ = job.Close()
-		w.setState(wire.StateOffline)
-		return err
+		w.finish(proc, job, code)
+		return
 	}
+
+	if code != 0 {
+		// The container entrypoint did not check either. A failed update
+		// usually leaves the previous files in place, and a server that starts
+		// stale is more useful than one that refuses to.
+		w.Log(wire.LogWarn, "the pre-start command failed; starting the server regardless",
+			"exit_code", code)
+	} else {
+		w.Log(wire.LogInfo, "the pre-start command finished", "exit_code", code)
+	}
+	_ = proc.Close()
+
+	// Reports its own failure.
+	_ = w.launchServer(p, job, token, true)
+}
+
+// launchServer starts the server process into job and hands the run to the
+// goroutines that follow it. The token is consumed. On failure the run is torn
+// down and reported offline.
+//
+// afterPreStart says a pre-start command ran first, in which case the stop
+// flags are live for this run and a set one means a stop arrived during the
+// handover. Otherwise they are stale from the previous run and are reset.
+func (w *Worker) launchServer(p wire.Start, job *jobobject.Job, token windows.Token, afterPreStart bool) error {
+	proc, err := winproc.Start(w.processConfig(p, p.Argv, token), job)
 	if token != 0 {
 		_ = token.Close()
+	}
+	if err != nil {
+		w.Log(wire.LogError, "could not start the server process",
+			"executable", p.Argv[0], "error", err)
+		w.abandon(job, 0)
+		return err
 	}
 
 	startedAt := time.Now()
 
 	w.mu.Lock()
+	if afterPreStart && (w.stopping || w.terminated) {
+		// A stop arrived while the pre-start command was handing over: what it
+		// acted on has already gone, and this process must not outlive the
+		// request that was meant to end the run.
+		w.mu.Unlock()
+		w.Log(wire.LogInfo, "a stop request arrived as the server was launching; killing it",
+			"pid", proc.Pid)
+		_ = proc.Kill()
+		_ = proc.Close()
+		w.abandon(job, 0)
+		return fmt.Errorf("worker: start interrupted by a stop request")
+	}
 	w.job = job
 	w.proc = proc
 	w.startedAt = startedAt
@@ -611,6 +723,23 @@ func (w *Worker) start(p wire.Start) error {
 	go w.pumpStats(job, startedAt, done)
 
 	return nil
+}
+
+// abandon gives up on a run that never reached the running state. The job goes,
+// killing anything still in it, the account token goes, and the daemon is told
+// the server is offline.
+func (w *Worker) abandon(job *jobobject.Job, token windows.Token) {
+	w.mu.Lock()
+	w.proc = nil
+	w.job = nil
+	w.startedAt = time.Time{}
+	w.mu.Unlock()
+
+	if token != 0 {
+		_ = token.Close()
+	}
+	_ = job.Close()
+	w.setState(wire.StateOffline)
 }
 
 // pumpConsole streams process output into the console buffer and out to every
@@ -654,7 +783,12 @@ func (w *Worker) watchExit(proc *winproc.Process, job *jobobject.Job, done chan<
 	if err != nil {
 		code = 0
 	}
+	w.finish(proc, job, code)
+}
 
+// finish tears a run down once its process has gone and tells the daemon how
+// it ended.
+func (w *Worker) finish(proc *winproc.Process, job *jobobject.Job, code uint32) {
 	w.mu.Lock()
 	w.exitCode = int(code)
 	memHit := w.memoryLimitHit

@@ -123,6 +123,15 @@ server account's full host privileges. The consequence is that shell operators
 are not interpreted, so eggs relying on `&&` or `>` need a rewritten startup line
 in their Windows profile.
 
+The entrypoint's other job, running a steamcmd update before the startup
+command when `AUTO_UPDATE` is set, is split between the two processes: the
+daemon decides whether one is due and builds it from the server's variables
+(`environment/windows/prestart.go`), and sends it to the worker as `PreStart`
+in the start message. The worker runs it in the same job and account with its
+output on the console, acknowledges the start immediately (the update can take
+minutes and the daemon is waiting on the worker's only connection), and
+launches the server when it exits. See `docs/PANEL-API.md` for the variables.
+
 ## What is genuinely weaker than Docker
 
 Stated plainly, because operators need to know:
@@ -187,12 +196,6 @@ every file during a walk. The error is always in the safe direction.
 | `cmd/winwings-worker` | the worker binary |
 
 ## Known gaps
-
-**ConPTY is unverified.** It is implemented and matches Microsoft's documented
-sample, but produced no output on the development machine. Pipe mode works fully
-and is the default. `internal/winproc/conpty_diag_test.go` records everything
-already ruled out; re-run it on a real interactive Windows host before relying on
-it. Only steamcmd-class processes need it.
 
 **Cross-platform transfers.** Backups and transfers carry POSIX modes and
 symlinks. Moving a server between a Linux node and a Windows node is not

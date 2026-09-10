@@ -10,6 +10,7 @@ import "path/filepath"
 //	<data>\<uuid>\data\            server files — the sandbox and SFTP root
 //	<data>\<uuid>\runtime\         per-server runtime, when one is provisioned
 //	<data>\<uuid>\tmp\             TEMP for this server, outside the disk quota
+//	<data>\<uuid>\steamcmd\        this server's steamcmd, for Steam games
 //	<data>\<uuid>\worker.json      worker configuration
 //	<data>\<uuid>\console.log      console history
 //
@@ -66,6 +67,17 @@ func (sc *SystemConfiguration) ServerWorkerConfig(uuid string) string {
 // account is granted write access here and nowhere else outside its data.
 func (sc *SystemConfiguration) ServerTemp(uuid string) string {
 	return filepath.Join(sc.Data, uuid, "tmp")
+}
+
+// ServerSteamcmd returns the directory holding a server's own copy of steamcmd.
+//
+// A sibling of ServerData, like ServerTemp, and for one more reason than quota
+// and backups: steamcmd on Windows refuses to install into its own folder or
+// any folder above it. The Linux layout, steamcmd inside the server directory
+// updating that same directory, therefore cannot work here. The server's
+// account is granted write access, since steamcmd updates itself in place.
+func (sc *SystemConfiguration) ServerSteamcmd(uuid string) string {
+	return filepath.Join(sc.Data, uuid, "steamcmd")
 }
 
 // ServerConsoleLog returns the path of a server's console log.

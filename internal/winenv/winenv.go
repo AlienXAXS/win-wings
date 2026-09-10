@@ -38,6 +38,10 @@ type Paths struct {
 	// would be charged against the user's disk quota and copied into every
 	// backup, both of which walk the sandbox root.
 	Temp string
+
+	// Steamcmd is the server's own steamcmd directory, exported as STEAMCMD_DIR.
+	// Empty leaves the variable unset.
+	Steamcmd string
 }
 
 // passthrough are host facts rather than policy: the same value the daemon sees
@@ -93,6 +97,13 @@ func Base(p Paths) []string {
 
 	if p.Temp != "" {
 		env = append(env, "TEMP="+p.Temp, "TMP="+p.Temp)
+	}
+
+	if p.Steamcmd != "" {
+		// Where a Steam egg's install script should put steamcmd, and where the
+		// daemon looks for it before a start. Outside the server directory on
+		// purpose: see config.SystemConfiguration.ServerSteamcmd.
+		env = append(env, "STEAMCMD_DIR="+p.Steamcmd)
 	}
 
 	if p.Data != "" {

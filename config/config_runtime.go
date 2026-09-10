@@ -117,18 +117,16 @@ type ConsoleConfiguration struct {
 	// twenty-minute download shows an empty console and then everything at once
 	// — exactly when somebody is watching to see whether it is progressing.
 	//
-	// Off by default anyway, because ConPTY is not yet dependable here. On some
-	// hosts a child attached to a pseudo console dies in the loader with
-	// 0xC0000142 having run nothing, and the same host launches it perfectly
-	// well on plain pipes; reproduced on a development machine where the
-	// identical call succeeds in isolation and fails in company, which is not a
-	// property to hand a default to. Turning this on trades buffered output for
-	// that risk, and the symptom is unmistakable: the install fails immediately
-	// with 0xC0000142 rather than running at all.
+	// What it costs: the output is a VT stream, so the install log carries
+	// escape sequences and cursor movement rather than clean lines. The Panel
+	// renders them; a text editor will show them raw.
 	//
-	// A ConPTY that cannot be allocated at all is handled separately, by falling
-	// back to pipes. That is the benign case; this setting is about the other one.
-	InstallPseudoConsole bool `default:"false" json:"install_pseudo_console" yaml:"install_pseudo_console"`
+	// On by default. It was off while a child attached to a pseudo console died
+	// in the loader with 0xC0000142 having run nothing, which was a bug here
+	// rather than a property of the platform -- see hpconValue in
+	// internal/winproc. A ConPTY that cannot be allocated at all is still handled
+	// by falling back to pipes, so the worst case is the old behaviour.
+	InstallPseudoConsole bool `default:"true" json:"install_pseudo_console" yaml:"install_pseudo_console"`
 
 	// Columns and Rows size the pseudo console when one is allocated. Some
 	// processes wrap or truncate output to the reported width.
