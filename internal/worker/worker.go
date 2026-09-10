@@ -584,10 +584,12 @@ func (w *Worker) start(p wire.Start) error {
 		_ = token.Close()
 	}
 
+	startedAt := time.Now()
+
 	w.mu.Lock()
 	w.job = job
 	w.proc = proc
-	w.startedAt = time.Now()
+	w.startedAt = startedAt
 	w.exitCode = 0
 	w.memoryLimitHit = false
 	w.terminated = false
@@ -597,10 +599,16 @@ func (w *Worker) start(p wire.Start) error {
 	w.Log(wire.LogInfo, "server process started", "pid", proc.Pid)
 	w.setState(wire.StateRunning)
 
+	// Everything spawned for this run is tied to it, not to the worker. The
+	// stats pump in particular must end with the process: one that survived
+	// would broadcast empty samples forever, and every later start would add
+	// another, until the daemon was receiving several overlapping streams.
+	done := make(chan struct{})
+
 	go w.pumpConsole(proc)
-	go w.watchExit(proc, job)
+	go w.watchExit(proc, job, done)
 	go w.watchJobEvents(job)
-	go w.pumpStats()
+	go w.pumpStats(job, startedAt, done)
 
 	return nil
 }
@@ -624,7 +632,9 @@ func (w *Worker) pumpConsole(proc *winproc.Process) {
 	}
 }
 
-func (w *Worker) watchExit(proc *winproc.Process, job *jobobject.Job) {
+// watchExit waits for the process to end, then tears the run down. Closing done
+// tells everything else spawned for this run that it is over.
+func (w *Worker) watchExit(proc *winproc.Process, job *jobobject.Job, done chan<- struct{}) {
 	// The only thing that reports the process ending. If it dies quietly the
 	// daemon waits forever on a server that has already gone, so a recovery here
 	// has to say so even though it does not know the exit code.
@@ -635,6 +645,10 @@ func (w *Worker) watchExit(proc *winproc.Process, job *jobobject.Job) {
 		}
 	}()
 	defer w.guard("watching for the server process to exit", &failure)
+
+	// Closed on every path out, including a panic, so that nothing tied to this
+	// run can outlive it.
+	defer close(done)
 
 	code, err := proc.Wait()
 	if err != nil {
@@ -675,7 +689,15 @@ func (w *Worker) watchJobEvents(job *jobobject.Job) {
 	}
 }
 
-func (w *Worker) pumpStats() {
+// pumpStats pushes a resource sample for one run every stats interval, and
+// ends when that run does.
+//
+// It samples the job it was given rather than whatever the worker currently
+// holds, so a pump can never report the next run's process as this one's, and it
+// returns on done rather than on the job going away, so a pump can never outlive
+// its run. Both matter: a pump that carried on after exit used to broadcast
+// empty samples indefinitely, and each restart stacked another on top of it.
+func (w *Worker) pumpStats(job *jobobject.Job, startedAt time.Time, done <-chan struct{}) {
 	defer w.guard("sampling resource usage", nil)
 
 	t := time.NewTicker(time.Duration(w.cfg.StatsIntervalMS) * time.Millisecond)
@@ -685,10 +707,22 @@ func (w *Worker) pumpStats() {
 		select {
 		case <-w.shutdown:
 			return
+		case <-done:
+			return
 		case <-t.C:
-			s, err := w.Stats()
+			s, err := sample(job, startedAt)
 			if err != nil {
+				// The job is closed once the process exits; a sample racing that
+				// close fails here, which is the run ending.
 				return
+			}
+			// A sample taken just before the exit must not be broadcast just
+			// after it: the daemon would see a live reading for a server it has
+			// already been told is offline.
+			select {
+			case <-done:
+				return
+			default:
 			}
 			w.broadcast(wire.TypeStats, s)
 		}
@@ -704,7 +738,11 @@ func (w *Worker) Stats() (wire.Stats, error) {
 	if job == nil {
 		return wire.Stats{}, nil
 	}
+	return sample(job, startedAt)
+}
 
+// sample reads one resource sample from a job.
+func sample(job *jobobject.Job, startedAt time.Time) (wire.Stats, error) {
 	s, err := job.Stats()
 	if err != nil {
 		return wire.Stats{}, err

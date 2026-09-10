@@ -469,3 +469,91 @@ func TestStopEscalationIsLogged(t *testing.T) {
 		t.Error("stop diagnostics never reported how long the stop took")
 	}
 }
+
+// TestStatsPumpBelongsToOneRun starts, stops, and starts a server again, and
+// checks that stats samples keep arriving at one per interval. The pump used to
+// belong to the worker rather than to the run: it carried on after the process
+// exited, broadcasting empty samples, and every restart started another one on
+// top, so a server restarted N times was reported N+1 times per interval.
+func TestStatsPumpBelongsToOneRun(t *testing.T) {
+	c, col, _ := startWorker(t, "stats-pump-test")
+
+	const interval = 300 * time.Millisecond // matches StatsIntervalMS in startWorker
+
+	start := func() {
+		t.Helper()
+		if err := c.Start(wire.Start{
+			Argv:   []string{comspec(), "/c", "ping -n 600 127.0.0.1 > nul"},
+			Env:    os.Environ(),
+			Limits: wire.Limits{ProcessLimit: 32},
+		}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		waitFor(t, 10*time.Second, "process running", func() bool {
+			s, err := c.Stats()
+			return err == nil && s.Processes > 0
+		})
+	}
+
+	statsCount := func() int {
+		col.mu.Lock()
+		defer col.mu.Unlock()
+		return len(col.stats)
+	}
+	resetStats := func() {
+		col.mu.Lock()
+		col.stats = nil
+		col.mu.Unlock()
+	}
+
+	// countOver measures how many samples arrive in a window long enough for
+	// jitter not to matter, and reports the count against the number of
+	// intervals that elapsed.
+	countOver := func(window time.Duration) (got int, intervals int) {
+		resetStats()
+		time.Sleep(window)
+		return statsCount(), int(window / interval)
+	}
+
+	start()
+	waitFor(t, 15*time.Second, "an exit event from the first run", func() bool {
+		_ = c.Terminate()
+		return col.exitCount() == 1
+	})
+
+	// Nothing is running, so nothing should be sampled. A pump that survived
+	// the exit shows up here as a stream of empty samples.
+	if got, _ := countOver(4 * interval); got != 0 {
+		t.Errorf("received %d stats samples while no process was running; want 0", got)
+	}
+
+	start()
+
+	// One pump: about one sample per interval. Two pumps: about two. The
+	// bound sits well clear of one and well short of two.
+	got, intervals := countOver(10 * interval)
+	t.Logf("second run: %d stats samples over %d intervals", got, intervals)
+	if got < intervals-2 {
+		t.Errorf("received %d stats samples over %d intervals; the pump is not running",
+			got, intervals)
+	}
+	if got > intervals+2 {
+		t.Errorf("received %d stats samples over %d intervals; more than one pump is running",
+			got, intervals)
+	}
+
+	// Each sample must describe this run, not the one that ended.
+	col.mu.Lock()
+	samples := append([]wire.Stats(nil), col.stats...)
+	col.mu.Unlock()
+	for i, s := range samples {
+		if s.Processes == 0 {
+			t.Errorf("sample %d reports no processes; it describes a run that has ended", i)
+		}
+	}
+
+	_ = c.Terminate()
+	waitFor(t, 15*time.Second, "an exit event from the second run", func() bool {
+		return col.exitCount() == 2
+	})
+}
