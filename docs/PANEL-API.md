@@ -187,6 +187,9 @@ Every standard egg variable is present, plus `SERVER_DIR`, `INSTALL_RUNTIME`
 and `STEAMCMD_DIR`. A non-zero exit fails the installation and the output is written to
 `<log_directory>\install\<uuid>.log` as well as streamed to the Panel.
 
+`docs\eggs\TEMPLATE.install.ps1` is a working skeleton to start from, and
+`docs\eggs\starrupture\install.ps1` a complete egg built on it.
+
 **Do not pipe a native command's output through PowerShell.** The script is given
 a pseudo console so that installers stream their progress live
 (`console.install_pseudo_console`, on by default). Writing
