@@ -326,29 +326,39 @@ if ($SteamCmdDir -and $AppId) {
     # Notes carried from the Linux eggs, all of which still apply:
     #  - `validate` is skipped on the first attempt: on a clean directory it
     #    only adds a full rehash pass and makes a failure slower to diagnose.
-    #  - Partial downloads are NOT deleted between attempts. Wiping
-    #    steamapps\downloading turns a transient CDN hiccup into three full-size
-    #    redownloads. Only the appinfo cache is cleared, which is the piece that
-    #    actually goes stale.
+    #  - NOTHING is deleted between attempts. Wiping steamapps\downloading turns
+    #    a transient CDN hiccup into three full-size redownloads, and wiping the
+    #    appinfo cache is worse - see below.
     #  - content_log.txt is dumped on failure rather than discarded.
     #
     # Dropped in the port: @sSteamCmdForcePlatformType. The Linux eggs forced
     # the Windows depot; here the native platform is already the right one and
     # forcing it invites a mismatch with the running SteamCMD.
-    $Retries   = 3
+    #
+    # Four attempts, not three, because the first one is effectively a warm-up.
+    # A freshly unpacked SteamCMD has an empty appcache, and its first
+    # +app_update fails before downloading anything:
+    #
+    #   ERROR! Failed to install app '<appid>' (Missing configuration)
+    #
+    # The app's config has not arrived yet - appinfo_log.txt shows the request
+    # going out and the update job returning "apps updated 0" in the same second
+    # the install gives up. The next attempt, run against the cache the first one
+    # left behind, downloads normally.
+    #
+    # This is why nothing here deletes appcache\appinfo.vdf between attempts.
+    # Every server gets its own steamcmd directory, so the first install is
+    # always a cold cache; clearing it on retry returns SteamCMD to that state
+    # every time, so every attempt behaves like the first and the install never
+    # gets past "Missing configuration". A self-healing first run then looks like
+    # a permanent failure. Clear a genuinely corrupt cache by hand instead.
+    $Retries   = 4
     $InstallOk = $false
 
     for ($i = 1; $i -le $Retries; $i++) {
         Write-Host '==================================================='
         Write-Host "SteamCMD install attempt $i of $Retries"
         Write-Host '==================================================='
-
-        # A corrupt appinfo cache produces "state is 0x202" with 0/0 progress.
-        # app_info_update refreshes it; it does not repair it. Delete it.
-        if ($i -gt 1) {
-            Remove-Item (Join-Path $SteamCmdDir 'appcache\appinfo.vdf') `
-                -Force -ErrorAction SilentlyContinue
-        }
 
         $steamArgs = @('+force_install_dir', $ServerDir, '+login', $SteamUser)
         if ($SteamPass) { $steamArgs += $SteamPass }
