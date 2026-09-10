@@ -104,7 +104,12 @@ running across a daemon disconnect and reconnect.
   host — the diagnostic records everything already ruled out.
 - **Port allocations are not enforced.** Nothing binds on a server's behalf.
   Use per-account firewall rules.
-- **No per-server network statistics.** There is no network namespace.
+- **Network statistics need an administrative daemon, or a one-time grant.**
+  Per-server byte counts come from a kernel trace rather than a network
+  namespace. Under the default managed isolation the daemon can start one; an
+  unprivileged daemon needs `wings service allow-network-stats` run once,
+  elevated. The counts are transport payload, a few percent under what an
+  interface counter would show.
 - **Cross-platform transfers are unsupported.** Backups carry POSIX modes and
   symlinks; Linux ↔ Windows node migration will not work.
 - **Every egg needs porting.** No upstream egg works unchanged.

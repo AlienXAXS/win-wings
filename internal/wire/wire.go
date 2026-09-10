@@ -294,6 +294,12 @@ type Stats struct {
 	// DiskReadBytes and DiskWriteBytes are cumulative for the job's lifetime.
 	DiskReadBytes  uint64 `json:"disk_read_bytes"`
 	DiskWriteBytes uint64 `json:"disk_write_bytes"`
+	// PIDs are the processes currently in the job. Network traffic is not
+	// counted by the worker: the daemon runs one host-wide kernel trace and
+	// attributes each packet to a server by the PID that sent or received it,
+	// and this list is what it attributes against. Empty when nothing is
+	// running. Additive, so a worker predating it simply reports no network.
+	PIDs []uint32 `json:"pids,omitempty"`
 }
 
 // Exit reports process termination.

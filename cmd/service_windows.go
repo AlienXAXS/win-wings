@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/pterodactyl/wings/internal/netstat"
 	"github.com/pterodactyl/wings/internal/winuser"
 )
 
@@ -200,6 +201,13 @@ Pass --account with --password to use an account you have already created, or
 		if account != "" {
 			fmt.Printf("  Account:    %s\n", account)
 		}
+		// An operator-supplied account was deliberately left untouched, so it
+		// may lack the rights per-server network statistics need. Say so here
+		// rather than leaving it to a warning in a log nobody reads at install.
+		if password != "" || noCreate {
+			fmt.Printf("\nIf %s is not an administrator, per-server network statistics need:\n"+
+				"    %s service allow-network-stats --account %s\n", account, filepath.Base(exe), account)
+		}
 		fmt.Printf("\nStart it with: sc start %s\n", ServiceName)
 		return nil
 	},
@@ -301,6 +309,46 @@ var serviceUninstallCommand = &cobra.Command{
 	},
 }
 
+var serviceAllowNetworkStatsCommand = &cobra.Command{
+	Use:   "allow-network-stats",
+	Short: "Let a non-administrator service account collect per-server network statistics.",
+	Long: `Grants an account the two rights the daemon needs to run the kernel network
+trace behind per-server network statistics: membership of Performance Log
+Users, which permits starting a trace session, and the right to enable the
+Microsoft-Windows-Kernel-Network provider, which by default only administrators
+hold.
+
+Must be run from an elevated prompt. An administrative service account -- the
+default under managed isolation -- already has both and does not need this.
+Use it for a daemon installed with --account and --password under pool or
+shared isolation, then restart the service.`,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		account, _ := cmd.Flags().GetString("account")
+		if account == "" {
+			return errors.New("--account is required")
+		}
+		name, err := localAccountName(account)
+		if err != nil {
+			return err
+		}
+		sid, err := winuser.SID(name)
+		if err != nil {
+			return err
+		}
+		if err := winuser.AddToPerformanceLogUsers(sid); err != nil {
+			return err
+		}
+		fmt.Printf("Added %s to Performance Log Users.\n", account)
+		if err := netstat.GrantEnable(sid); err != nil {
+			return err
+		}
+		fmt.Printf("Granted %s the right to enable the kernel network provider.\n", account)
+		fmt.Printf("Restart the service for this to take effect: sc stop %s && sc start %s\n",
+			ServiceName, ServiceName)
+		return nil
+	},
+}
+
 var serviceStatusCommand = &cobra.Command{
 	Use:   "status",
 	Short: "Show the win-wings service status.",
@@ -372,10 +420,13 @@ func init() {
 		"permit installing as LocalSystem, which is strongly discouraged")
 	serviceUninstallCommand.Flags().Bool("remove-account", false,
 		"also delete the service account the daemon created for itself")
+	serviceAllowNetworkStatsCommand.Flags().String("account", "",
+		`the service account to grant, e.g. .\winwings`)
 
 	serviceCommand.AddCommand(serviceInstallCommand)
 	serviceCommand.AddCommand(serviceUninstallCommand)
 	serviceCommand.AddCommand(serviceStatusCommand)
+	serviceCommand.AddCommand(serviceAllowNetworkStatsCommand)
 	rootCommand.AddCommand(serviceCommand)
 }
 

@@ -151,6 +151,17 @@ type SystemConfiguration struct {
 	// Firewall configures whether the daemon opens servers' allocated ports.
 	Firewall FirewallConfiguration `yaml:"firewall"`
 
+	// NetworkStats enables per-server network accounting. There is no network
+	// namespace to read counters from, so the daemon runs one Event Tracing
+	// for Windows session on the kernel's network provider and attributes each
+	// packet to a server by the process that moved it; see internal/netstat.
+	//
+	// Starting that session needs the daemon's account to be an administrator
+	// or a member of the Performance Log Users group. Managed isolation already
+	// implies the former. Without either the trace is reported as unavailable
+	// at boot and the Panel's network graphs read zero.
+	NetworkStats bool `default:"true" yaml:"network_stats"`
+
 	// The amount of time in seconds that can elapse before a server's disk space calculation is
 	// considered stale and a re-check should occur. DANGER: setting this value too low can seriously
 	// impact system performance and cause massive I/O bottlenecks and high CPU usage for the Wings

@@ -252,6 +252,16 @@ C:\ProgramData\WinWings\wings.exe service install `
   --account .\winwings --password <password>
 ```
 
+Per-server network statistics need two further rights an ordinary account lacks:
+membership of Performance Log Users, to start a trace session, and permission to
+enable the kernel network provider, which by default only administrators hold.
+Neither is needed to run servers; without them the daemon warns at boot and the
+Panel's network graphs read zero. Grant both, elevated, with:
+
+```powershell
+C:\ProgramData\WinWings\wings.exe service allow-network-stats --account .\winwings
+```
+
 The daemon reports what it ended up with at boot, and refuses to start if
 `isolation: pool` is set without those two privileges, rather than failing at the
 first server start:

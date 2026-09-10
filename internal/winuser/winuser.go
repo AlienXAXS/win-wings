@@ -337,13 +337,28 @@ func IsAdministrator(name string) (bool, error) {
 // Used only for the daemon's own service account, which needs to be able to
 // create the per-server accounts and rewrite NTFS permissions.
 func AddToAdministrators(sid *windows.SID) error {
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	return addToWellKnownGroup(sid, windows.WinBuiltinAdministratorsSid, "Administrators")
+}
+
+// AddToPerformanceLogUsers puts an account in the local Performance Log Users
+// group, which is what lets a non-administrator start an Event Tracing for
+// Windows session. The daemon needs one for per-server network statistics.
+func AddToPerformanceLogUsers(sid *windows.SID) error {
+	return addToWellKnownGroup(sid, windows.WinBuiltinPerfLoggingUsersSid, "Performance Log Users")
+}
+
+// addToWellKnownGroup adds an account to a built-in local group identified by
+// its well-known SID. The English name is only for error messages.
+func addToWellKnownGroup(sid *windows.SID, kind windows.WELL_KNOWN_SID_TYPE, english string) error {
+	groupSID, err := windows.CreateWellKnownSid(kind)
 	if err != nil {
 		return err
 	}
-	group, _, _, err := admins.LookupAccount("")
+	// The group is named differently in each display language, so it has to be
+	// resolved from the well-known SID rather than spelled out.
+	group, _, _, err := groupSID.LookupAccount("")
 	if err != nil {
-		return fmt.Errorf("winuser: could not resolve the Administrators group: %w", err)
+		return fmt.Errorf("winuser: could not resolve the %s group: %w", english, err)
 	}
 	groupPtr, err := windows.UTF16PtrFromString(group)
 	if err != nil {

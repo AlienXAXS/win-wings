@@ -753,6 +753,10 @@ func sample(job *jobobject.Job, startedAt time.Time) (wire.Stats, error) {
 		uptime = time.Since(startedAt).Milliseconds()
 	}
 
+	// Best effort. The daemon attributes network traffic by these; without
+	// them this sample carries no network figures, and the next one will.
+	pids, _ := job.ProcessIDs()
+
 	return wire.Stats{
 		MemoryBytes:    s.MemoryBytes,
 		CpuAbsolute:    s.CpuAbsolute,
@@ -760,6 +764,7 @@ func sample(job *jobobject.Job, startedAt time.Time) (wire.Stats, error) {
 		UptimeMillis:   uptime,
 		DiskReadBytes:  s.DiskReadBytes,
 		DiskWriteBytes: s.DiskWriteBytes,
+		PIDs:           pids,
 	}, nil
 }
 

@@ -18,6 +18,7 @@ separately:
 | kill the container, kill the tree | `TerminateJobObject` |
 | filesystem isolation | one local account per server + NTFS ACLs, both daemon-managed |
 | published ports | per-server Windows Firewall rules |
+| per-container network counters | one host-wide kernel network trace, attributed by PID (`internal/netstat`) |
 | network namespace, port publishing | **nothing** — see below |
 | console surviving daemon restart | a per-server worker process |
 | `/mnt/server` bind mount for installs | `$env:SERVER_DIR` |
@@ -156,7 +157,18 @@ can read every other server's files and the daemon's configuration, which holds
 the Panel token controlling every server on the node. The daemon warns loudly
 about this at boot.
 
-**No network namespace**, so per-server network statistics are reported as zero.
+**No network namespace**, so there is no interface whose counters are one
+server's alone. Network statistics come instead from Event Tracing for Windows:
+the kernel's network provider reports every send and receive with the owning
+process and the byte count, the daemon runs one real-time session on it, and
+each worker reports the PIDs in its job so packets can be charged to the right
+server. One session serves the whole node because a provider can be enabled by
+at most eight sessions and the machine allows 64 in total; a session per worker
+would exhaust both. The counts are transport payload rather than bytes on the
+wire, and under sustained heavy load the kernel can drop events when the
+session's buffers fill, which reads as a low figure. Starting the session needs
+Performance Log Users membership; enabling the provider needs administrator
+rights or an explicit grant, which `wings service allow-network-stats` applies.
 
 **Hard links are over-counted** in disk usage. Windows exposes neither the link
 count nor the file index through `os.FileInfo`, and obtaining them means opening

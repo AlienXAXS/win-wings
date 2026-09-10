@@ -25,6 +25,7 @@ import (
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/events"
 	"github.com/pterodactyl/wings/internal/accounts"
+	"github.com/pterodactyl/wings/internal/netstat"
 	"github.com/pterodactyl/wings/internal/winacl"
 	"github.com/pterodactyl/wings/internal/winfw"
 	"github.com/pterodactyl/wings/internal/wire"
@@ -397,6 +398,7 @@ func (e *Environment) Destroy() error {
 	e.mu.Unlock()
 
 	e.SetState(environment.ProcessOfflineState)
+	netstat.Release(e.Id)
 
 	// One tree per server, so removal is a single call. The server's files, its
 	// worker configuration, its console log and any private runtime all go

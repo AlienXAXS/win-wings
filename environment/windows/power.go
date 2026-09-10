@@ -16,6 +16,7 @@ import (
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/internal/accounts"
+	"github.com/pterodactyl/wings/internal/netstat"
 	"github.com/pterodactyl/wings/internal/winenv"
 	"github.com/pterodactyl/wings/internal/winproc"
 	"github.com/pterodactyl/wings/internal/wire"
@@ -186,6 +187,9 @@ func (e *Environment) handlers() worker.Handlers {
 				e.mu.Unlock()
 				e.SetState(environment.ProcessRunningState)
 			case wire.StateStarting:
+				// A new run starts its network totals from zero, as a fresh
+				// container's interface did.
+				netstat.Reset(e.Id)
 				e.SetState(environment.ProcessStartingState)
 			case wire.StateStopping:
 				e.SetState(environment.ProcessStoppingState)
@@ -215,15 +219,20 @@ func (e *Environment) handlers() worker.Handlers {
 		},
 
 		Stats: func(p wire.Stats) {
+			// Network figures do not come from the worker. There is no network
+			// namespace to count against, so the daemon runs one host-wide
+			// kernel trace and charges each packet to whichever server's job
+			// holds the PID that moved it. The worker's part is saying which
+			// PIDs those are.
+			netstat.Claim(e.Id, p.PIDs)
+			net := netstat.Totals(e.Id)
+
 			e.Events().Publish(environment.ResourceEvent, environment.Stats{
 				Memory:      p.MemoryBytes,
 				MemoryLimit: uint64(e.Config().Limits().BoundedMemoryLimit()),
 				CpuAbsolute: p.CpuAbsolute,
 				Uptime:      p.UptimeMillis,
-				// Per-server network counters have no Windows equivalent without a
-				// network namespace. Reported as zero rather than omitted so the
-				// Panel's console graphs still render.
-				Network: environment.NetworkStats{},
+				Network:     environment.NetworkStats{RxBytes: net.Rx, TxBytes: net.Tx},
 			})
 		},
 

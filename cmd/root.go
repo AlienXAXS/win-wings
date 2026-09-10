@@ -30,6 +30,7 @@ import (
 	"github.com/pterodactyl/wings/environment"
 	"github.com/pterodactyl/wings/internal/cron"
 	"github.com/pterodactyl/wings/internal/database"
+	"github.com/pterodactyl/wings/internal/netstat"
 	"github.com/pterodactyl/wings/loggers/cli"
 	"github.com/pterodactyl/wings/remote"
 	"github.com/pterodactyl/wings/router"
@@ -71,7 +72,10 @@ func rootCmdEntry(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if err := RunAsService(func() { rootCmdRun(cmd, args) }, nil); err != nil {
+	// The trace session is a kernel object that outlives the process. It is
+	// replaced at the next boot regardless, but a clean stop does not leave
+	// the kernel buffering events nobody will read in the meantime.
+	if err := RunAsService(func() { rootCmdRun(cmd, args) }, func() { _ = netstat.Stop() }); err != nil {
 		log.WithField("error", err).Fatal("failed to run as a Windows service")
 	}
 }
@@ -131,6 +135,22 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 	if err := config.ValidateWindowsHost(); err != nil {
 		log.WithField("error", err).Fatal("host is not correctly configured to run servers")
 		return
+	}
+
+	// Per-server network figures come from one host-wide kernel trace. It is
+	// not essential: a node without it runs every server exactly as before,
+	// with the Panel's network graphs flat at zero.
+	if config.Get().System.NetworkStats {
+		if err := netstat.Start(); err != nil {
+			log.WithField("error", err).Warn("per-server network statistics are unavailable: the " +
+				"kernel network trace could not be started. The daemon's account must be an " +
+				"administrator or a member of the Performance Log Users group; until it is, " +
+				"network graphs will read zero")
+		} else {
+			log.Info("per-server network statistics enabled via a kernel network trace")
+		}
+	} else {
+		log.Info("system.network_stats is disabled; network graphs will read zero")
 	}
 
 	t := config.Get().Token

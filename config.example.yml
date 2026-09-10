@@ -136,6 +136,19 @@ system:
     # daemon's own prefix are considered; anything else is left alone.
     prune: true
 
+  # Per-server network statistics for the Panel's console graphs.
+  #
+  # Docker gave each container an interface whose counters were its own. Here
+  # the daemon runs one kernel network trace for the whole host and charges each
+  # packet to the server whose process moved it. The figures are transport
+  # payload, a few percent below what an interface counter would show.
+  #
+  # Starting the trace needs an administrative daemon, which managed isolation
+  # already requires. An unprivileged daemon needs a one-time grant:
+  #   wings.exe service allow-network-stats --account .\winwings
+  # Without either, this is reported as unavailable at boot and graphs read zero.
+  network_stats: true
+
   sftp:
     bind_address: 0.0.0.0
     bind_port: 2022

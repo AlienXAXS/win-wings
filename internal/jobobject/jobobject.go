@@ -393,6 +393,50 @@ func (j *Job) Stats() (Stats, error) {
 	return s, nil
 }
 
+// jobObjectBasicProcessIdList is the information class returning
+// JOBOBJECT_BASIC_PROCESS_ID_LIST: two ULONG counts followed by ULONG_PTR
+// process identifiers.
+const jobObjectBasicProcessIdList = 3
+
+// ProcessIDs lists the processes currently in the job.
+//
+// The daemon attributes host-wide network accounting to servers by PID, and
+// this is the authoritative list: every process the server starts lands in
+// the job, so a launcher's children are counted along with it.
+func (j *Job) ProcessIDs() ([]uint32, error) {
+	const header = 8 // NumberOfAssignedProcesses + NumberOfProcessIdsInList
+	entry := int(unsafe.Sizeof(uintptr(0)))
+
+	capacity := 64
+	for attempt := 0; attempt < 4; attempt++ {
+		buf := make([]byte, header+capacity*entry)
+		err := windows.QueryInformationJobObject(
+			j.handle,
+			jobObjectBasicProcessIdList,
+			uintptr(unsafe.Pointer(&buf[0])),
+			uint32(len(buf)),
+			nil,
+		)
+		assigned := *(*uint32)(unsafe.Pointer(&buf[0]))
+		listed := *(*uint32)(unsafe.Pointer(&buf[4]))
+		if err != nil {
+			if err == windows.ERROR_MORE_DATA && int(assigned) > capacity {
+				// The counts are filled in even when the list does not fit.
+				capacity = int(assigned) + 16
+				continue
+			}
+			return nil, fmt.Errorf("jobobject: query process list: %w", err)
+		}
+		ids := unsafe.Slice((*uintptr)(unsafe.Pointer(&buf[header])), int(listed))
+		out := make([]uint32, len(ids))
+		for i, id := range ids {
+			out[i] = uint32(id)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("jobobject: process list kept growing while it was being read")
+}
+
 // pumpEvents translates completion port notifications into Event values.
 func (j *Job) pumpEvents() {
 	for {
