@@ -20,6 +20,10 @@
 # ignore logfiles (/* so the .gitkeep override works)
 /logs/*
 
+# scratch space: log dumps pulled off a server for debugging, and anything else
+# staged by hand while chasing a failure
+/temp/
+
 # ignore configuration file
 /config.yml
 /config*.yml
