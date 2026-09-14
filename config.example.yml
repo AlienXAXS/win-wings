@@ -163,6 +163,35 @@ system:
     detect_clean_exit_as_crash: false
     timeout: 60
 
+# Node load agent for the Panel's Free Servers extension (ax-freeservers).
+#
+# On Linux nodes that extension polls a separate Docker container
+# (ax-freeservers/node-agent) for host CPU, memory and disk. There is no
+# container engine here, so the daemon answers the same requests itself:
+#
+#   GET http://<node>:<port>/ping       no auth        {"ok":true}
+#   GET http://<node>:<port>/metrics    Bearer <token> cpu / memory / disk
+#
+# It is a second, plain-HTTP listener with its own token rather than a route on
+# the main API: the Panel polls it over http:// with the per-node token from its
+# Node Agent Status table, not the node's own credential.
+stats_agent:
+  enabled: false
+
+  # Must match the Panel's "Agent Port", or this node's port override there.
+  host: 0.0.0.0
+  port: 8081
+
+  # Bearer token the Panel sends. Leave empty with the agent enabled and the
+  # daemon generates one at boot, writes it here, and logs where to paste it.
+  # Supports the file:// prefix.
+  token: ''
+
+  # Write an inbound allow rule for the port (needs system.firewall.manage).
+  # The rule admits any source; the response is aggregate load numbers only,
+  # but narrow it to the Panel's address if this node faces the internet.
+  open_firewall: true
+
 # Replaces upstream's `docker:` block. Everything here maps onto Windows Job
 # Objects, which are the closest equivalent to the cgroup controls Docker gave.
 runtime:

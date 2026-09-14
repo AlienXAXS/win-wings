@@ -36,6 +36,7 @@ import (
 	"github.com/pterodactyl/wings/router"
 	"github.com/pterodactyl/wings/server"
 	"github.com/pterodactyl/wings/sftp"
+	"github.com/pterodactyl/wings/statsagent"
 	"github.com/pterodactyl/wings/system"
 )
 
@@ -137,6 +138,18 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 		return
 	}
 
+	// Resolved before the configuration is written back below, so a token
+	// generated here lands in config.yml on this same boot.
+	var statsTokenGenerated bool
+	var statsTokenErr error
+	config.Update(func(c *config.Configuration) {
+		statsTokenGenerated, statsTokenErr = c.ResolveStatsAgentToken()
+	})
+	if statsTokenErr != nil {
+		log.WithField("error", statsTokenErr).Fatal("stats_agent.token could not be resolved")
+		return
+	}
+
 	// Per-server network figures come from one host-wide kernel trace. It is
 	// not essential: a node without it runs every server exactly as before,
 	// with the Panel's network graphs flat at zero.
@@ -215,6 +228,12 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 		}
 	}
 
+	if statsTokenGenerated {
+		log.WithField("config_file", configPath).Warn("stats_agent is enabled with no token, so one was " +
+			"generated and written to stats_agent.token in the configuration file. Copy it into the " +
+			"Panel: Admin -> Free Servers -> Auto Stock -> Node Agent Status -> this node's Token field")
+	}
+
 	// Just for some nice log output.
 	for _, s := range manager.All() {
 		log.WithField("server", s.ID()).Info("finished loading configuration for server")
@@ -244,6 +263,7 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 	}()
 
 	pruneFirewallRules(manager.All())
+	openStatsAgentPort()
 
 	// Create a new workerpool that limits us to 4 servers being bootstrapped at a time
 	// on Wings. This allows us to ensure the environment exists, write configurations,
@@ -337,6 +357,29 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 	} else {
 		log.WithField("subsystem", "cron").Info("starting cron processes")
 		s.StartAsync()
+	}
+
+	// Host load sampling runs for the life of the process. The main API serves
+	// the report under the node token regardless; the separate plain-HTTP
+	// listener the Panel's Free Servers extension polls is opt-in.
+	hostStats := statsagent.NewCollector(config.Get().System.Data)
+	go hostStats.Run(cmd.Context())
+	router.HostStats = hostStats
+
+	if sa := config.Get().StatsAgent; sa.Enabled {
+		agent, err := statsagent.New(sa, hostStats)
+		if err != nil {
+			log.WithField("error", err).Fatal("failed to configure the stats agent")
+			return
+		}
+		go func() {
+			if err := agent.Run(cmd.Context()); err != nil {
+				log.WithFields(log.Fields{"error": err, "address": sa.Address()}).
+					Fatal("failed to start the stats agent listener; is the port already in use?")
+			}
+		}()
+	} else {
+		log.Debug("stats_agent is disabled; the Panel's Free Servers extension cannot poll this node")
 	}
 
 	go func() {

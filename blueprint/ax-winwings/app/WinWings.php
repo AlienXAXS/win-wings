@@ -230,6 +230,7 @@ class WinWings
         $payload = [
             'runtime' => (string) $profile->runtime,
             'startup' => (string) ($profile->startup ?? ''),
+            'working_dir' => (string) ($profile->working_dir ?? ''),
             'pseudo_console' => (bool) $profile->pseudo_console,
         ];
 
@@ -240,6 +241,70 @@ class WinWings
             ];
         }
 
+        $console = self::consolePayload($profile);
+
+        if ($console) {
+            $payload['console'] = $console;
+        }
+
+        $prestart = self::prestartScript($profile);
+
+        if ($prestart !== null) {
+            $payload['pre_start_script'] = $prestart;
+        }
+
         return $payload;
+    }
+
+    /**
+     * The console redirection half of the payload, or null when this egg's
+     * console is its process's own stdio — which is nearly all of them.
+     *
+     * Each half is emitted only when it is actually set. The daemon reads a
+     * missing half as "the ordinary arrangement", so sending `{"type": ""}` would
+     * be no clearer, and a half-filled object is easier to misread than an absent
+     * one.
+     */
+    public static function consolePayload(object $profile): ?array
+    {
+        $console = [];
+
+        if (trim((string) ($profile->console_source_type ?? '')) === 'file') {
+            $console['source'] = [
+                'type' => 'file',
+                'path' => (string) ($profile->console_source_path ?? ''),
+                'encoding' => (string) ($profile->console_source_encoding ?? '') ?: 'utf-8',
+            ];
+        }
+
+        if (trim((string) ($profile->console_command_type ?? '')) === 'telnet') {
+            $console['commands'] = [
+                'type' => 'telnet',
+                'host' => (string) ($profile->console_command_host ?? ''),
+                'port' => (string) ($profile->console_command_port ?? ''),
+                'password' => (string) ($profile->console_command_password ?? ''),
+                'connect_timeout_seconds' => (int) ($profile->console_connect_timeout ?? 0),
+            ];
+        }
+
+        return $console ?: null;
+    }
+
+    /**
+     * The pre-start script, or null when this egg has none.
+     *
+     * Gated on its own switch rather than on the text being present, so that a
+     * script can be turned off for a boot without losing it — which is the first
+     * thing anybody does when a server stops starting.
+     */
+    public static function prestartScript(object $profile): ?string
+    {
+        if (!($profile->prestart_override ?? false)) {
+            return null;
+        }
+
+        $script = (string) ($profile->prestart_script ?? '');
+
+        return trim($script) !== '' ? $script : null;
     }
 }

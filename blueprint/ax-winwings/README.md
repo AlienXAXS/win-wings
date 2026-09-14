@@ -38,6 +38,14 @@ Per egg, and every field falls back to the egg on its own:
 - **Startup** — the Windows command line. Executed directly, not through a
   shell, so `&&`, `|` and `>` are not interpreted. Both `{{VAR}}` and `${VAR}`
   are substituted. Empty uses the egg's own line.
+- **Working directory** — where the server process is started, relative to its
+  data directory, and what the startup command's relative paths resolve against.
+  Empty is the data directory itself, which is what nearly every egg wants. It is
+  for a game that builds its own paths by climbing out of wherever it was started
+  — a log root at `..\Logs` is the usual shape — which from the data directory
+  lands in the server root, a directory the server's account cannot write and
+  must not be able to. Applies to the server process only: a steamcmd update and
+  the log tail stay at the data directory.
 - **Stop** — `command` (text written to stdin) or `signal`. Windows has no
   signals, but the daemon can deliver one interrupt: a `signal` stop with the
   value `ctrl_c` writes `0x03` to the server's console input and the console

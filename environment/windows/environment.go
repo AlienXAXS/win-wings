@@ -54,12 +54,31 @@ type Metadata struct {
 	// time the server is synced, which would put the Linux command straight back.
 	Startup string
 
+	// WorkingDir is where the server process is started, relative to the
+	// server's data directory. Empty means the data directory itself.
+	//
+	// Held here for the same reason Startup is: it comes from the Windows
+	// profile, and the server's environment variables are rebuilt on every sync.
+	WorkingDir string
+
 	// Stop describes how the server should be brought down gracefully.
 	Stop remote.ProcessStopConfiguration
 
 	// PseudoConsole requests a ConPTY rather than pipes for this egg. Needed only
 	// by processes that detect a non-console stdout and change behaviour.
 	PseudoConsole bool
+
+	// Console redirects the server's output and command input away from its own
+	// stdio -- onto a log file it writes, and a TCP console it listens on. The
+	// zero value is the ordinary arrangement, which is what nearly every egg
+	// wants. See remote.ConsoleProfile.
+	Console remote.ConsoleProfile
+
+	// PreStartScript is PowerShell the egg wants run before every boot. Held here
+	// for the same reason Startup is: it comes from the Windows profile, which is
+	// re-fetched on every sync, and there is nowhere in the Panel's own server
+	// configuration for it to live.
+	PreStartScript string
 }
 
 // Environment supervises one server via its worker.
@@ -202,10 +221,40 @@ func (e *Environment) SetStartup(s string) {
 	e.mu.Unlock()
 }
 
+// SetWorkingDir updates where the server process is started, relative to its
+// data directory. Empty restores the data directory itself.
+//
+// Takes effect on the next boot: a process's working directory is fixed when it
+// is created.
+func (e *Environment) SetWorkingDir(d string) {
+	e.mu.Lock()
+	e.meta.WorkingDir = d
+	e.mu.Unlock()
+}
+
 // SetPseudoConsole updates whether this egg's process gets a ConPTY.
 func (e *Environment) SetPseudoConsole(v bool) {
 	e.mu.Lock()
 	e.meta.PseudoConsole = v
+	e.mu.Unlock()
+}
+
+// SetConsole updates where this server's console output and command input go.
+//
+// Takes effect on the next boot rather than immediately: the log tail and the
+// command channel belong to a run, and moving a running server's console out
+// from under the people watching it is not an in-situ update.
+func (e *Environment) SetConsole(c remote.ConsoleProfile) {
+	e.mu.Lock()
+	e.meta.Console = c
+	e.mu.Unlock()
+}
+
+// SetPreStartScript updates the PowerShell run before each boot. Empty removes
+// it.
+func (e *Environment) SetPreStartScript(s string) {
+	e.mu.Lock()
+	e.meta.PreStartScript = s
 	e.mu.Unlock()
 }
 

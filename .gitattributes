@@ -1,0 +1,24 @@
+# This repository is developed on Windows, where git is commonly configured with
+# core.autocrlf=true and rewrites every text file to CRLF on checkout. That is
+# right for the Go sources, which nothing but Windows ever compiles, and wrong
+# for anything that is deployed somewhere else.
+#
+# The Blueprint extension is the thing that is deployed somewhere else. It is
+# copied onto a Pterodactyl Panel, which is Linux, and its installer is run there
+# by bash -- which does not tolerate a carriage return at the end of a line and
+# does not say so clearly when it finds one. `set -e` becomes "invalid option",
+# every other line becomes "$'\r': command not found", and the first `if` block
+# fails at its `elif` with a syntax error, none of which names the cause.
+#
+# So the whole extension is pinned to LF regardless of how anyone's git is
+# configured, and so is any shell script anywhere in the tree.
+
+blueprint/** text eol=lf
+*.sh text eol=lf
+
+# Marked before the rule above can try to normalise them.
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.ico binary
+*.gif binary

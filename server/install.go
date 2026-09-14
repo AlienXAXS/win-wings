@@ -389,23 +389,12 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return "", errors.WrapIf(err, "install: failed to apply installer resource limits")
 	}
 
-	powershell, err := powershellPath()
+	powershell, err := winproc.PowerShellPath()
 	if err != nil {
-		return "", err
+		return "", errors.WrapIf(err, "install: no interpreter to run the installation script")
 	}
 
-	// -ExecutionPolicy Bypass is scoped to this process only and is required
-	// because the script is generated rather than signed. -NonInteractive and
-	// -NoProfile keep a script from stalling on a prompt or inheriting operator
-	// profile state.
-	argv := []string{
-		powershell,
-		"-NoProfile",
-		"-NonInteractive",
-		"-NoLogo",
-		"-ExecutionPolicy", "Bypass",
-		"-File", ip.scriptPath(),
-	}
+	argv := winproc.PowerShellArgv(powershell, ip.scriptPath())
 
 	username, password, err := accounts.For(ip.Server.ID())
 	if err != nil {
@@ -518,27 +507,6 @@ func (ip *InstallationProcess) Execute() (string, error) {
 
 	ip.Server.Events().Publish(DaemonMessageEvent, "Installation process completed.")
 	return sb.String(), nil
-}
-
-// powershellPath locates a PowerShell interpreter.
-//
-// Windows PowerShell 5.1 is present on every supported Windows install and is
-// used by default. PowerShell 7 is preferred when present, since egg authors are
-// more likely to target it and it handles UTF-8 far better.
-func powershellPath() (string, error) {
-	candidates := []string{
-		filepath.Join(os.Getenv("ProgramFiles"), "PowerShell", "7", "pwsh.exe"),
-		filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-	}
-	for _, c := range candidates {
-		if c == "" {
-			continue
-		}
-		if _, err := os.Stat(c); err == nil {
-			return c, nil
-		}
-	}
-	return "", errors.New("install: could not locate a PowerShell interpreter")
 }
 
 // SyncInstallState makes an HTTP request to the Panel instance notifying it that

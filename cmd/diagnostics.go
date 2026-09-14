@@ -109,6 +109,13 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	fmt.Fprintln(output, "         SFTP Server:", redact(cfg.System.Sftp.Address), ":", cfg.System.Sftp.Port)
 	fmt.Fprintln(output, "      SFTP Read-Only:", cfg.System.Sftp.ReadOnly)
 	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "         Stats Agent:", cfg.StatsAgent.Enabled)
+	if cfg.StatsAgent.Enabled {
+		fmt.Fprintln(output, "  Stats Agent Listen:", redact(cfg.StatsAgent.Host), ":", cfg.StatsAgent.Port)
+		fmt.Fprintln(output, "   Stats Agent Token:", map[bool]string{true: "set", false: "(will be generated at boot)"}[cfg.StatsAgent.Token != ""])
+		fmt.Fprintln(output, "Stats Agent Firewall:", cfg.StatsAgent.OpenFirewall)
+	}
+	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "      Root Directory:", cfg.System.RootDirectory)
 	fmt.Fprintln(output, "      Logs Directory:", cfg.System.LogDirectory)
 	fmt.Fprintln(output, "    Servers Directory:", cfg.System.Data)

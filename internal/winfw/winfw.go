@@ -106,6 +106,41 @@ func Apply(uuid, serverName string, b Binding) error {
 	return nil
 }
 
+// OpenListener opens one TCP port for a listener the daemon itself runs, such as
+// the stats agent, under the same naming and pruning as a server's rules.
+//
+// Only TCP: unlike an allocation, the daemon knows exactly what it is binding.
+// Any existing rule of the same name is replaced so a changed port does not
+// leave the old one open. A host of "" or a wildcard admits every address.
+func OpenListener(id, label, host string, port int) error {
+	if err := Remove(id); err != nil {
+		return err
+	}
+	ips, ports := flatten(Binding{host: {port}})
+	if len(ports) == 0 {
+		return fmt.Errorf("winfw: port %d is out of range", port)
+	}
+
+	args := []string{
+		"advfirewall", "firewall", "add", "rule",
+		"name=" + RuleName(id, "TCP"),
+		"dir=in",
+		"action=allow",
+		"protocol=TCP",
+		"localport=" + joinInts(ports),
+		"profile=any",
+		"enable=yes",
+		"description=win-wings: " + sanitise(label),
+	}
+	if len(ips) > 0 {
+		args = append(args, "localip="+strings.Join(ips, ","))
+	}
+	if out, err := netsh(args...); err != nil {
+		return fmt.Errorf("winfw: could not open port %d for %s: %w: %s", port, id, err, out)
+	}
+	return nil
+}
+
 // Remove closes a server's ports.
 //
 // Deleting a rule that does not exist is not an error: netsh reports it, and a

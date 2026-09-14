@@ -11,6 +11,7 @@ import (
 	"github.com/pterodactyl/wings/router/tokens"
 
 	"github.com/pterodactyl/wings/config"
+	"github.com/pterodactyl/wings/internal/hoststats"
 	"github.com/pterodactyl/wings/router/middleware"
 	"github.com/pterodactyl/wings/server"
 	"github.com/pterodactyl/wings/server/installer"
@@ -43,6 +44,24 @@ func getSystemInformation(c *gin.Context) {
 		OS:            i.System.OSType,
 		Version:       i.Version,
 	})
+}
+
+// HostStats is the daemon's host load sampler, set at boot. Nil leaves the
+// metrics route answering 503, which only happens in tests.
+var HostStats *hoststats.Collector
+
+// Returns the same host load report the stats agent serves on its own port,
+// here under the node token. Lets an operator check the figures through the
+// Panel's credentials without knowing the agent token, and gives a node that
+// has the agent disabled a way to show what it would report.
+func getSystemMetrics(c *gin.Context) {
+	if HostStats == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "host statistics are not being collected",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, HostStats.Report())
 }
 
 // Returns all the servers that are registered and configured correctly on

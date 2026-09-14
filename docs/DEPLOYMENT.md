@@ -314,6 +314,82 @@ a different one. Nothing on Windows can, short of per-account outbound filtering
 A server that binds an unallocated port will find it unreachable from outside,
 which is usually enough.
 
+## Node load agent (Free Servers)
+
+The `ax-freeservers` Panel extension sizes its free-server stock from each
+node's CPU, memory and disk. On Linux nodes it polls a Docker container
+(`ax-freeservers/node-agent`) running beside wings. There is no Docker here, so
+the daemon serves the same two endpoints itself, from the Windows APIs, on a
+second listener:
+
+| Path       | Auth                    | Body                                          |
+|------------|-------------------------|-----------------------------------------------|
+| `/ping`    | none                    | `{"ok":true}`                                 |
+| `/metrics` | `Authorization: Bearer` | `version`, `cpu`, `memory`, `disk` — see below |
+
+It is a separate port and token, over plain HTTP, because that is what the
+Panel does: `CollectNodeMetrics` requests `http://<fqdn>:<agent port>/metrics`
+with the per-node token from **Admin → Free Servers → Auto Stock → Node Agent
+Status**. Nothing about the main API's TLS or node token is involved, which also
+means the load token can be rotated without touching the credential that
+controls every server.
+
+Enable it:
+
+```yaml
+stats_agent:
+  enabled: true
+  port: 8081        # must match the Panel's Agent Port or this node's override
+  token: ''         # leave empty: the daemon generates one at boot
+```
+
+Restart the service. With no token set, the daemon generates a 64-character
+one, writes it back into `config.yml`, and logs where to paste it. Read it with:
+
+```powershell
+Select-String -Path C:\ProgramData\WinWings\config.yml -Pattern '^\s+token:' | Select-Object -Last 1
+```
+
+(The first `token:` in the file is the node's Panel credential; the one under
+`stats_agent:` is the last.) Then check from the Panel host:
+
+```bash
+curl -H "Authorization: Bearer <token>" http://node.example.com:8081/metrics
+```
+
+When the daemon is managing the firewall it opens the port with a rule named
+`win-wings-stats-agent-tcp`, and prunes that rule again once the agent is
+disabled. The rule admits any source. The response is only aggregate load
+numbers, but if the node is on the open internet either narrow the rule to the
+Panel's address in `wf.msc` or set `open_firewall: false` and write your own.
+
+The same report is also served on the main API as `GET /api/system/metrics`
+under the node token, for checking the figures without the agent token.
+
+### What the figures mean on Windows
+
+The JSON shape is version 2 of the Linux agent's, field for field, so a mixed
+fleet reads consistently in the Panel. The sources differ:
+
+- **`cpu.percent`** is utilisation from `GetSystemTimes` — kernel + user time
+  minus idle, sampled every 5 s and reported over the last minute, capped at
+  100. There is no iowait to exclude: a thread blocked on disk is simply not
+  running.
+- **`cpu.load_1m/5m/15m`** — Windows has no load average, so one is synthesised
+  the way the Linux kernel computes its own: an exponentially damped average,
+  with the same decay constants, of *busy cores + processor ready-queue
+  length* (`\System\Processor Queue Length` via PDH). The Panel displays
+  `load_1m` and sizes stock from `percent`, so the approximation costs nothing
+  where it matters. `load_percent` is `load_1m / cores × 100` as on Linux; a
+  large gap between it and `utilisation_percent` still means the node is
+  queuing for CPU rather than short of it.
+- **`memory.available_mb`** is `GlobalMemoryStatusEx.AvailPhys`: free pages
+  plus the standby (cache) lists, the same idea as Linux's `MemAvailable`. A
+  node with a large file cache does not read as full.
+- **`disk`** is `GetDiskFreeSpaceEx` on the volume holding `system.data`, the
+  space available to the daemon's account. `null` if that volume cannot be
+  measured.
+
 ## Upgrading
 
 Stop the service, replace both binaries, start it again. **Running servers are

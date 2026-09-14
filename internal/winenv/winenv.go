@@ -126,6 +126,10 @@ func Base(p Paths) []string {
 			// Not a Windows convention, but enough ported tooling reads it that
 			// setting it costs nothing and omitting it costs a support ticket.
 			"HOME="+p.Data,
+			// The name the install script is given for the same directory. A
+			// pre-start script is written by the same person against the same egg,
+			// and having to call it something else there would be a trap.
+			"SERVER_DIR="+p.Data,
 		)
 	}
 

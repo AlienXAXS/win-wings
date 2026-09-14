@@ -66,6 +66,10 @@ Returns the Windows profile for the egg the given server uses.
 }
 ```
 
+`working_dir`, `console` and `pre_start_script` may also be present. Both are for the handful of
+eggs that need them and are described under [Consoles that are not stdio](#consoles-that-are-not-stdio)
+and [Pre-start scripts](#pre-start-scripts); omitting them is the normal case.
+
 **404 response** means no profile is configured for this egg. What the daemon
 does then depends on `runtime.require_windows_profile`:
 
@@ -86,9 +90,44 @@ plugin outage cannot stop a node from booting servers it already knows about.
 | `startup` | string | Windows startup command. Empty uses the Panel's standard startup value. Supports `{{VAR}}` and `${VAR}`. |
 | `stop.type` | string | `command` or `signal`. |
 | `stop.value` | string | For `command`, the text written to stdin (`stop`, `end`, `quit`). For `signal`, leave empty to get a Ctrl+C interrupt, or name a break (`ctrl_break`, `break`, `sigquit`) to get CTRL_BREAK instead. |
+| `working_dir` | string | Where the server process is started, relative to the server's data directory, and what the startup command's own relative paths resolve against. Empty is the data directory itself. Supports `{{VAR}}` and `${VAR}`. See below. |
 | `pseudo_console` | bool | Allocate a ConPTY rather than pipes. Only for processes that detect a non-console stdout — steamcmd being the usual case. |
+| `console` | object | Where console output is read from and where commands are written to. Omit for the ordinary arrangement, which is the process's own stdio. |
+| `pre_start_script` | string | PowerShell run to completion before every boot. Omit or leave empty for none. |
 
 Omitting `stop` entirely uses the egg's standard stop configuration.
+
+#### Working directories
+
+Every server is started in its data directory, `<data>/<uuid>/data`, which is the
+only part of its tree the server's own account can write. `working_dir` moves the
+*server process* into a subdirectory of that, and nothing else with it.
+
+It exists for the games that do not ask where they are. A server that writes its
+logs to `..\Logs` is computing a path from the directory it was started in;
+started from the data directory that resolves to `<data>/<uuid>`, the server's
+root, which the account is denied and must stay denied — `worker.json` lives
+there, and a server able to write it can rewrite the command its own supervisor
+executes. Naming the subdirectory the game was installed into moves the whole
+computation back inside the sandbox, with no permission loosened anywhere.
+
+Three consequences worth knowing:
+
+- The startup command's relative paths resolve against it. With a `working_dir`
+  of `ServerFile`, the startup command is `MyServer.exe`, not
+  `ServerFile\MyServer.exe`.
+- Pre-start commands do not use it. A steamcmd update and the egg's
+  `pre_start_script` both run in the data directory, because they are what
+  install the content `working_dir` names — on a fresh server it does not exist
+  until they have run.
+- The console log source does not use it either. `console.source.path` stays
+  relative to the data directory, so moving the process does not silently move
+  where the daemon looks for the log.
+
+The daemon substitutes variables into it and refuses anything resolving outside
+the server's directory, falling back to the data directory and logging the
+reason. The worker checks again before launching, and refuses the start if the
+directory does not exist by then.
 
 #### Stopping a server
 
@@ -108,6 +147,101 @@ how long the server was given.
 An unmodified egg carrying a POSIX signal name needs no special handling: any
 `signal` stop becomes a Ctrl+C, which is the closest thing Windows has and is
 what such an egg meant. Only reach for the break spellings to override that.
+
+#### Consoles that are not stdio
+
+A few games write their log only to a file and take commands only on a TCP port
+they open themselves. Their Linux eggs deal with this in the startup line, which
+stops being a command and becomes a shell pipeline:
+
+```sh
+wine EmpyrionDedicated.exe -logFile ../Logs/server/server.log & PID=$! ;
+tail -c0 -F ../Logs/server/server.log &
+until nc -z 127.0.0.1 21004; do sleep 1; done ;
+telnet -E 127.0.0.1 21004 ;
+wait $PID
+```
+
+There is no shell here and a startup command is executed directly, so this is
+declared rather than run. Both halves are independent and both default to the
+process's own stdio:
+
+```json
+"console": {
+  "source": {
+    "type": "file",
+    "path": "Logs/server/server.log",
+    "encoding": "utf-8"
+  },
+  "commands": {
+    "type": "telnet",
+    "host": "127.0.0.1",
+    "port": "{{TELNET_PORT}}",
+    "password": "{{TELNET_PASSWORD}}",
+    "connect_timeout_seconds": 300
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `source.type` | string | `file` to follow a log file. Omitted or empty reads only the process's own output. |
+| `source.path` | string | The log file, **relative to the server's data directory**. Supports `{{VAR}}` and `${VAR}`. Either separator. An absolute path, a UNC path, or one climbing out of the directory is refused. |
+| `source.encoding` | string | `utf-8` (the default), `utf-16le` or `utf-16be`. |
+| `commands.type` | string | `telnet` for a TCP console. Omitted or empty writes to the process's stdin. |
+| `commands.host` | string | Empty means `127.0.0.1`. |
+| `commands.port` | string | A **string**, so it can carry `{{TELNET_PORT}}` or whichever variable the egg uses. Substituted and parsed by the node. |
+| `commands.password` | string | Sent as the first line after connecting, when set. Substituted. |
+| `commands.connect_timeout_seconds` | int | How long the node waits for the port to open. Zero means five minutes. |
+
+Things worth knowing before writing one:
+
+- **The game process is still the process.** Neither of these puts anything
+  between the daemon and the server: the exit code, the crash detection and the
+  resource limits are the game's, exactly as for any other egg. This is the
+  reason it is declared here rather than being a scripted wrapper.
+- **The log is followed by name.** A log the game deletes and recreates on boot
+  is followed into the new file, and content already in the file when the server
+  starts is skipped, so a restart does not replay the previous run.
+- **The process's own output is still streamed.** These games usually say nothing
+  on stdout, but when they do — a crash before the log is open, a licence
+  complaint — that is exactly the output somebody is looking for.
+- **Everything the TCP console sends back goes on the console**, its banner
+  included. That is how you tell a connected channel from a silent one.
+- **A server with a command channel must have a `command` stop.** The stop is
+  written to the channel; a `signal` stop has no console to interrupt, so the
+  node would kill the server rather than asking it to save.
+- **The channel is never mixed with stdin.** A command that cannot be delivered
+  is reported on the server console rather than written to a stdin the game is
+  not reading, where it would vanish and look successful.
+- **Nothing here fails a boot.** A port that cannot be parsed or a log path that
+  is refused leaves a server that runs, with the reason in the node's log. A
+  server that is up and uncommandable is easier to diagnose than one that will
+  not start.
+
+#### Pre-start scripts
+
+`pre_start_script` is PowerShell run to completion before every boot, in the
+server's data directory, as the server's own account, with its output on the
+console. It is the counterpart to the install script, and it is for preparing a
+server rather than running one: writing a configuration file out of the egg's
+variables on every boot is the case it exists for.
+
+- It runs **after** any steamcmd update, so it can patch a file the update has
+  just replaced.
+- The working directory is the server's data directory, also exported as
+  `SERVER_DIR`. The egg's variables are in the environment, as they are during an
+  install.
+- The daemon stages it into the server root, which the server can read and cannot
+  write. A script inside the server's own directory would be a server rewriting
+  what its next boot executes.
+- A non-zero exit is logged and the server starts anyway. A server running with
+  a stale configuration is more use than one that refuses to boot, and the
+  operator can see both.
+
+It does not replace the startup command, and a script that tries to launch the
+game itself will have it killed: the pre-start step is waited for, and the server
+is only launched once it exits.
 
 #### Runtime names
 

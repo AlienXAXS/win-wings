@@ -60,12 +60,27 @@ Route::middleware(['web', 'auth'])->group(function () {
                 'enabled' => (bool) $profile->enabled,
                 'runtime' => (string) $profile->runtime,
                 'startup' => (string) ($profile->startup ?? ''),
+                'working_dir' => (string) ($profile->working_dir ?? ''),
                 'stop_type' => $profile->stop_type,
                 'stop_value' => (string) ($profile->stop_value ?? ''),
                 'pseudo_console' => (bool) $profile->pseudo_console,
                 'install_override' => (bool) $profile->install_override,
                 'install_script' => (string) ($profile->install_script ?? ''),
                 'notes' => (string) ($profile->notes ?? ''),
+
+                // Advanced settings. Sent flat rather than nested because the
+                // editor is a flat form; WinWings::consolePayload does the
+                // nesting for the daemon.
+                'console_source_type' => (string) ($profile->console_source_type ?? ''),
+                'console_source_path' => (string) ($profile->console_source_path ?? ''),
+                'console_source_encoding' => (string) ($profile->console_source_encoding ?? ''),
+                'console_command_type' => (string) ($profile->console_command_type ?? ''),
+                'console_command_host' => (string) ($profile->console_command_host ?? ''),
+                'console_command_port' => (string) ($profile->console_command_port ?? ''),
+                'console_command_password' => (string) ($profile->console_command_password ?? ''),
+                'console_connect_timeout' => $profile->console_connect_timeout ?? null,
+                'prestart_override' => (bool) ($profile->prestart_override ?? false),
+                'prestart_script' => (string) ($profile->prestart_script ?? ''),
             ] : null,
 
             // Exactly what GET /api/remote/windows/servers/{uuid}/profile would

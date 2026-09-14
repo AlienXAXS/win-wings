@@ -37,7 +37,7 @@ import (
 // have new daemons talking to old workers. The daemon checks this on connect and
 // refuses to drive a worker it does not understand, rather than misinterpreting
 // its messages.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // PipeName returns the named pipe path for a server's worker.
 func PipeName(uuid string) string {
@@ -194,15 +194,32 @@ type Start struct {
 	// Env is the process environment as "KEY=VALUE" strings.
 	Env []string `json:"env"`
 
-	// PreStart is a command to run to completion before Argv, in the same job,
-	// directory, environment and account, with its output on the console. Empty
-	// means none.
+	// WorkingDir is the server process's working directory, relative to the
+	// server's data directory. Empty means the data directory itself, which is
+	// what almost every egg wants.
+	//
+	// It exists for games that build their own paths by climbing out of the
+	// directory they were started in -- a log root at "..\Logs" is the common
+	// shape. Started from the data directory that lands in the server's root,
+	// which the account is denied by design; started from the subdirectory the
+	// game was installed into it lands back inside the sandbox.
+	//
+	// Resolved and confined by the daemon and checked again here. It applies to
+	// the server process only: pre-start commands keep the data directory,
+	// because they run before the install content that this names exists.
+	WorkingDir string `json:"working_dir,omitempty"`
+
+	// PreStart are commands to run to completion, in order, before Argv, in the
+	// same job, directory, environment and account, with their output on the
+	// console. Empty means none.
 	//
 	// This is what the Docker image's entrypoint did ahead of the startup
-	// command -- a steamcmd update, typically. The daemon decides whether one is
-	// due and what it is; the worker only runs it. It may carry credentials, so
-	// the worker does not log it.
-	PreStart []string `json:"pre_start,omitempty"`
+	// command -- a steamcmd update, typically -- plus whatever preparation the
+	// egg's own pre-start script does. The daemon decides which are due and what
+	// they are; the worker only runs them in the order given. They may carry
+	// credentials, so the worker logs a command's label rather than its
+	// arguments.
+	PreStart []PreStartCommand `json:"pre_start,omitempty"`
 
 	// Limits to apply to the Job Object before the process runs.
 	Limits Limits `json:"limits"`
@@ -212,6 +229,11 @@ type Start struct {
 	Cols          uint16 `json:"cols,omitempty"`
 	Rows          uint16 `json:"rows,omitempty"`
 
+	// Console redirects where the server's output is read from and where its
+	// commands are written to. The zero value is the ordinary arrangement: the
+	// process's own stdout and stdin.
+	Console ConsoleConfig `json:"console,omitempty"`
+
 	// Username and Password name the local account to run the process as. Empty
 	// runs it as the account the worker itself uses.
 	//
@@ -220,6 +242,105 @@ type Start struct {
 	// the filesystem at all, even in a directory the daemon owns.
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+}
+
+// PreStartCommand is one command run to completion ahead of the server.
+type PreStartCommand struct {
+	// Argv is the resolved command, already split by the daemon.
+	Argv []string `json:"argv"`
+	// Label names the command for the log, because Argv cannot be logged: a
+	// steamcmd update carries the account password in it.
+	Label string `json:"label,omitempty"`
+}
+
+// ConsoleConfig describes where a run's console output comes from and where the
+// commands typed into the Panel go.
+//
+// Both default to the process's own stdio, which is what almost every egg wants.
+// They exist for the servers that want neither: a game that logs only to a file
+// and accepts commands only over a TCP port of its own. On Linux those eggs are
+// started through a shell pipeline -- tail -F into the container's stdout and a
+// telnet client on its stdin -- which has no equivalent here and would in any
+// case put a shell between the daemon and the process it supervises. Doing it in
+// the worker keeps the game process the process: its exit code is still the
+// server's, and a stop still acts on it.
+type ConsoleConfig struct {
+	// Source says where console output is read from.
+	Source LogSource `json:"source,omitempty"`
+	// Commands says where console input is written to.
+	Commands CommandChannel `json:"commands,omitempty"`
+}
+
+// SourceType selects where a run's console output comes from.
+type SourceType string
+
+const (
+	// SourceStdout reads the process's own output. The default.
+	SourceStdout SourceType = "stdout"
+	// SourceFile additionally follows a log file the server writes.
+	SourceFile SourceType = "file"
+)
+
+// LogSource configures following a server's log file.
+//
+// The process's own output is streamed either way. A server that logs to a file
+// usually says nothing on stdout, but when it does -- a startup banner, a fatal
+// error raised before the log is opened -- that is exactly the output somebody
+// needs, and there is no reason to suppress it.
+type LogSource struct {
+	Type SourceType `json:"type,omitempty"`
+
+	// Path is the log file, relative to the server's data directory. Absolute
+	// paths and any path escaping that directory are refused by the daemon; the
+	// worker checks again, because it is the one holding the privileges.
+	Path string `json:"path,omitempty"`
+
+	// Encoding names the file's character encoding. Empty and "utf-8" are passed
+	// through unchanged; "utf-16le" and "utf-16be" are decoded to UTF-8, because
+	// a .NET server writing a log with a default StreamWriter produces UTF-16
+	// that a console renders as text interleaved with NUL bytes.
+	Encoding string `json:"encoding,omitempty"`
+}
+
+// ChannelType selects where console input is written.
+type ChannelType string
+
+const (
+	// ChannelStdin writes to the process's standard input. The default.
+	ChannelStdin ChannelType = "stdin"
+	// ChannelTelnet writes to a TCP port the server itself listens on.
+	ChannelTelnet ChannelType = "telnet"
+)
+
+// CommandChannel configures a TCP console for a server that does not read
+// stdin.
+//
+// The channel is a byte pipe in both directions: commands are written as lines,
+// and everything the server sends back goes on the console, which is where the
+// answer to a command belongs. "telnet" names what the server is speaking rather
+// than a client being run: only option negotiation is handled, and only by
+// refusing every option, which is what a line-oriented game console wants
+// anyway.
+type CommandChannel struct {
+	Type ChannelType `json:"type,omitempty"`
+
+	// Host to connect to. Empty means 127.0.0.1, which is the only address one
+	// of these consoles should ever be reachable on.
+	Host string `json:"host,omitempty"`
+
+	// Port the server listens on.
+	Port int `json:"port,omitempty"`
+
+	// Password is sent as the first line after connecting, when set. Several
+	// game consoles open with a password prompt and accept nothing until it is
+	// answered.
+	Password string `json:"password,omitempty"`
+
+	// ConnectTimeoutSeconds bounds how long the worker keeps trying to reach the
+	// port after the server starts. A game that takes two minutes to load a world
+	// does not open its console until it has, so this is a wait rather than a
+	// retry budget. Zero means the worker's default.
+	ConnectTimeoutSeconds int `json:"connect_timeout_seconds,omitempty"`
 }
 
 // UpdateLimits adjusts resource limits without restarting the process. This is

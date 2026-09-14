@@ -1,20 +1,44 @@
 package windows
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/apex/log"
 
+	"github.com/pterodactyl/wings/internal/accounts"
+	"github.com/pterodactyl/wings/internal/winacl"
 	"github.com/pterodactyl/wings/internal/winproc"
+	"github.com/pterodactyl/wings/internal/wire"
 )
 
 // steamcmdExe is the executable's name within the server's steamcmd directory.
 const steamcmdExe = "steamcmd.exe"
 
-// resolvePreStart returns the command to run to completion before the server
-// starts, or nil when there is none.
+// resolvePreStart returns the commands to run to completion, in order, before
+// the server starts. Nil when there are none.
+//
+// Two things can land here, and the order between them is not arbitrary. The
+// steamcmd update goes first because it rewrites the server's files; an egg's
+// own pre-start script goes second because what it almost always does is patch
+// one of those files with the server's variables, and a script that ran before
+// the update would have its work overwritten by it.
+func (e *Environment) resolvePreStart(envVars []string) []wire.PreStartCommand {
+	var cmds []wire.PreStartCommand
+
+	if argv := e.resolveSteamUpdate(envVars); argv != nil {
+		cmds = append(cmds, wire.PreStartCommand{Argv: argv, Label: "the steamcmd update"})
+	}
+	if argv := e.resolveEggPreStart(); argv != nil {
+		cmds = append(cmds, wire.PreStartCommand{Argv: argv, Label: "this egg's pre-start script"})
+	}
+	return cmds
+}
+
+// resolveSteamUpdate returns the steamcmd update to run before the server, or
+// nil when none is due.
 //
 // Under Docker this was the steamcmd image's entrypoint: before handing over
 // to the startup command it ran an app_update whenever AUTO_UPDATE was set.
@@ -25,7 +49,7 @@ const steamcmdExe = "steamcmd.exe"
 // Whether a server is a Steam game at all is decided by the presence of
 // steamcmd in the server's steamcmd directory, which the install script is
 // told about as STEAMCMD_DIR. A server without one is not touched.
-func (e *Environment) resolvePreStart(envVars []string) []string {
+func (e *Environment) resolveSteamUpdate(envVars []string) []string {
 	dir := e.workingDirectory()
 	exe := filepath.Join(e.steamcmdDirectory(), steamcmdExe)
 	if _, err := os.Stat(exe); err != nil {
@@ -44,6 +68,90 @@ func (e *Environment) resolvePreStart(envVars []string) []string {
 	e.log().WithField("command", strings.Join(redactSteamSecrets(argv), " ")).
 		Info("running a steamcmd update before the server starts")
 	return argv
+}
+
+// preStartScriptName is the staged script's filename, beside install.ps1.
+const preStartScriptName = "prestart.ps1"
+
+// resolveEggPreStart stages the egg's pre-start script and returns the command
+// that runs it, or nil when the egg has none.
+//
+// A failure here is reported and skipped rather than failing the boot. The
+// script is preparation, not the server: a config file that did not get rewritten
+// leaves a server running with its previous settings, which the operator can see
+// and fix, whereas refusing to start leaves them with a stopped server and a line
+// in a log they have to go looking for.
+func (e *Environment) resolveEggPreStart() []string {
+	e.mu.RLock()
+	script := e.meta.PreStartScript
+	e.mu.RUnlock()
+
+	if strings.TrimSpace(script) == "" {
+		return nil
+	}
+
+	path, err := e.stagePreStartScript(script)
+	if err != nil {
+		e.log().WithField("error", err).Error(
+			"could not stage this egg's pre-start script; the server is starting without it")
+		return nil
+	}
+
+	powershell, err := winproc.PowerShellPath()
+	if err != nil {
+		e.log().WithField("error", err).Error(
+			"no PowerShell interpreter to run this egg's pre-start script; " +
+				"the server is starting without it")
+		return nil
+	}
+
+	e.log().WithField("script", path).Info("running this egg's pre-start script before the server starts")
+	return winproc.PowerShellArgv(powershell, path)
+}
+
+// stagePreStartScript writes the script where the server can read it but not
+// write it, and returns its path.
+//
+// The reasoning is the installer's, and it matters more here: this script runs
+// before every single boot, under the server's own account. Staged in the
+// server root -- which the daemon owns and the server has no access to -- with
+// read and execute granted on this one file. A script inside the server's data
+// directory would be a server rewriting what its next boot executes.
+func (e *Environment) stagePreStartScript(script string) (string, error) {
+	path := filepath.Join(e.ServerRoot(), preStartScriptName)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+
+	// PowerShell is content with either line ending, but normalising to CRLF
+	// avoids surprises in here-strings within scripts authored on Windows.
+	body := strings.ReplaceAll(script, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\n", "\r\n")
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(f, strings.NewReader(body)); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	// Closed before the ACL is rewritten, for the same reason the installer does:
+	// leaving it open past the point the server account needs to read it invites
+	// a sharing violation.
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+
+	username, _, err := accounts.For(e.Id)
+	if err != nil {
+		return "", err
+	}
+	if err := winacl.GrantReadFile(path, username); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // steamcmdUpdate builds the update command from the variables the standard

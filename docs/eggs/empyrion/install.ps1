@@ -499,11 +499,16 @@ if ($copied.Count -gt 0) {
 ## ---------------------------------------------------------------------------
 ## Log directory
 ##
-## The startup command passes `-logFile ..\Logs\server\server.log`. Unity opens
-## that path but does not create the directories leading to it: if they are
-## missing the server runs with no log at all, and the Panel console - which is
-## fed by tailing that file - stays empty for a server that is working fine.
-## The game creates Logs\ on its own eventually, but not before the first write.
+## The startup command passes `-logFile Logs\server\server.log` - no `..\` prefix,
+## unlike the Linux egg, which needs one only because it has cd'd into
+## DedicatedServer first. Every server here runs with its data directory as the
+## working directory.
+##
+## Unity opens that path but does not create the directories leading to it: if
+## they are missing the server runs with no log at all, and the Panel console -
+## which is fed by following that file - stays empty for a server that is working
+## fine. The game creates Logs\ on its own eventually, but not before the first
+## write. See PROFILE.md, where the same path is set as the console log source.
 ## ---------------------------------------------------------------------------
 
 New-Item -ItemType Directory -Force -Path (Join-Path $ServerDir 'Logs\server') | Out-Null

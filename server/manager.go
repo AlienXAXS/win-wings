@@ -319,6 +319,9 @@ func (s *Server) applyWindowsProfile(meta *winenv.Metadata) error {
 		meta.Stop = *profile.Stop
 	}
 	meta.PseudoConsole = profile.PseudoConsole
+	meta.Console = profile.Console
+	meta.PreStartScript = profile.PreStartScript
+	meta.WorkingDir = profile.WorkingDir
 
 	// A Windows-specific startup command replaces the Panel's, which is almost
 	// always Linux-shaped.
@@ -335,6 +338,10 @@ func (s *Server) applyWindowsProfile(meta *winenv.Metadata) error {
 		"pseudo_console":   meta.PseudoConsole,
 		"startup_override": profile.Startup != "",
 		"stop_override":    profile.Stop != nil,
+		"log_source":       profile.Console.Source.Type,
+		"command_channel":  profile.Console.Commands.Type,
+		"pre_start_script": profile.PreStartScript != "",
+		"working_dir":      profile.WorkingDir,
 	}).Debug("applied the egg's windows profile")
 
 	return nil

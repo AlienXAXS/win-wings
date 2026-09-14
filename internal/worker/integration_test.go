@@ -445,7 +445,10 @@ func TestStopEscalationIsLogged(t *testing.T) {
 		"mode=command",
 		"command=this-is-not-a-stop-command",
 		"timeout=2s",
-		"writing the stop command to the process's stdin",
+		// Where the command went is part of the diagnostic, because a server with
+		// its own command console sends it somewhere else entirely.
+		"sending the stop command",
+		"to=the process's stdin",
 		"the process is still running; escalating",
 		"sending ctrl+c to the server's console",
 	} {

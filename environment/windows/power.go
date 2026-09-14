@@ -306,6 +306,8 @@ func (e *Environment) Start(ctx context.Context) error {
 		return err
 	}
 
+	workingDir := e.resolveWorkingDir(envVars)
+
 	// Reapplied on every start rather than only at creation: the Panel can
 	// change a server's allocations while it is stopped, and a rule left over
 	// from the previous set would leave the new ports closed and the old ones
@@ -322,11 +324,13 @@ func (e *Environment) Start(ctx context.Context) error {
 	if err := c.Start(wire.Start{
 		Argv:          argv,
 		Env:           envVars,
+		WorkingDir:    workingDir,
 		PreStart:      e.resolvePreStart(envVars),
 		Limits:        e.Config().Limits().AsJobLimits(),
 		PseudoConsole: pty || console.PseudoConsole,
 		Cols:          console.Columns,
 		Rows:          console.Rows,
+		Console:       e.resolveConsole(envVars),
 		Username:      username,
 		Password:      password,
 	}); err != nil {
@@ -339,6 +343,43 @@ func (e *Environment) Start(ctx context.Context) error {
 	e.mu.Unlock()
 
 	return nil
+}
+
+// resolveWorkingDir works out where the server process should be started,
+// relative to its data directory.
+//
+// Empty is the ordinary answer and means the data directory itself. An egg sets
+// this when the game computes paths by climbing out of the directory it was
+// started in: from the data directory a "..\Logs" lands in the server's root,
+// which the account is denied and must stay denied, because worker.json lives
+// there. Naming the game's own subdirectory puts that computation back inside
+// the sandbox.
+//
+// Degrades rather than refuses, like the console profile: a bad value leaves a
+// server that starts in its data directory, which an operator can see and
+// correct, rather than one that will not boot for a reason buried in a log.
+func (e *Environment) resolveWorkingDir(envVars []string) string {
+	e.mu.RLock()
+	raw := e.meta.WorkingDir
+	e.mu.RUnlock()
+
+	dir := strings.TrimSpace(expandVars(raw, envLookup(envVars)))
+	if dir == "" {
+		return ""
+	}
+
+	// Checked here as well as in the worker, for the same reason the log path is:
+	// this is the message an operator sees against the profile they just edited,
+	// and the worker's is the one that actually guards the launch.
+	if err := checkContained(dir); err != nil {
+		e.log().WithFields(log.Fields{"working_dir": dir, "error": err}).Error(
+			"ignoring this egg's working directory; the server will start in its data " +
+				"directory instead. Check the working directory in the egg's windows profile")
+		return ""
+	}
+
+	e.log().WithField("working_dir", dir).Debug("this server starts in a subdirectory of its data")
+	return dir
 }
 
 // resolveStartup turns the egg's startup string into an argv.

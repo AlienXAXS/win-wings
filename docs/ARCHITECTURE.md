@@ -132,6 +132,52 @@ output on the console, acknowledges the start immediately (the update can take
 minutes and the daemon is waiting on the worker's only connection), and
 launches the server when it exits. See `docs/PANEL-API.md` for the variables.
 
+`PreStart` is a list, run in order. An egg can add a PowerShell script of its
+own after the steamcmd update — the profile's `pre_start_script` — for the
+servers whose configuration file has to be rewritten from their egg variables on
+every boot. The daemon stages it into the server root, which the server account
+can read and cannot write, exactly as it does the install script, for the same
+reason: it runs as that account before every single boot.
+
+## Consoles that are not the process's stdio
+
+A few games write their log only to a file and take commands only on a TCP port
+they open themselves. Their Linux eggs bolt the two onto the container's stdio
+in the startup line, with `tail -F` feeding stdout and a telnet client reading
+stdin, and `wait $PID` at the end so that the game rather than the pipeline
+decides when the server has stopped.
+
+None of that survives the port, and reproducing it with a PowerShell wrapper
+would be worse than not having it: the wrapper, not the game, would be the
+process the worker supervises, so the exit code, the crash detection and every
+step of the stop escalation would be aimed at the wrong thing.
+
+So it is declared in the egg's Windows profile instead and the worker does both
+jobs itself, against the game process it already holds:
+
+- **`console.source`** — the worker follows a log file by *name*, not by handle,
+  so a log the game deletes and recreates on boot is followed into the new file
+  (`internal/worker/logtail.go`). The file is opened with `FILE_SHARE_DELETE`,
+  which `os.Open` does not ask for and without which the tail would deny the game
+  the ability to rotate its own log. Content already in the file when the run
+  starts is skipped, so a restart does not replay the previous run. The process's
+  own output is streamed as well, never instead.
+- **`console.commands`** — the worker holds a TCP connection to the port and
+  writes commands to it, putting everything the server sends back onto the
+  console (`internal/worker/channel.go`). Telnet option negotiation is answered
+  by refusing every option, which is what the `telnet -E` in those eggs settles
+  on. A run configured this way never falls back to stdin: the game is not
+  reading it, so a command written there would be swallowed and reported as
+  delivered.
+
+The daemon resolves both from the profile before the worker sees them
+(`environment/windows/console.go`): egg variables are substituted, the port is
+parsed, and a log path that escapes the server's directory is refused — twice,
+because the worker is the half with the privileges. Every failure here degrades
+rather than refuses the boot. A server that runs and cannot be sent commands is
+visible and fixable; one that will not start because a profile field is wrong is
+a stopped server and a line in a log.
+
 ## What is genuinely weaker than Docker
 
 Stated plainly, because operators need to know:
@@ -193,6 +239,8 @@ every file during a walk. The error is always in the safe direction.
 | `internal/wire` | daemon ↔ worker protocol |
 | `internal/worker` | the supervisor, and the daemon-side client |
 | `environment/windows` | `ProcessEnvironment` implemented over the worker |
+| `internal/hoststats` | host CPU, memory and disk figures; synthesised load average |
+| `statsagent` | the plain-HTTP node load listener the Free Servers extension polls |
 | `cmd/winwings-worker` | the worker binary |
 
 ## Known gaps

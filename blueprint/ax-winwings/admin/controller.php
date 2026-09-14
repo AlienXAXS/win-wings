@@ -244,6 +244,7 @@ class {identifier}ExtensionController extends Controller
             'egg_id' => 'required|integer|exists:eggs,id',
             'runtime' => 'nullable|string|max:191',
             'startup' => 'nullable|string|max:65535',
+            'working_dir' => 'nullable|string|max:512',
             'stop_type' => 'nullable|string|in:command,signal',
             'stop_value' => 'nullable|string|max:191',
             'pseudo_console' => 'nullable',
@@ -251,7 +252,35 @@ class {identifier}ExtensionController extends Controller
             'install_script' => 'nullable|string',
             'notes' => 'nullable|string|max:65535',
             'enabled' => 'nullable',
+
+            // Advanced settings. All optional and all off by default: an egg
+            // whose game reads stdin and writes stdout wants none of them.
+            'console_source_type' => 'nullable|string|in:,stdout,file',
+            'console_source_path' => 'nullable|string|max:512',
+            'console_source_encoding' => 'nullable|string|in:,utf-8,utf-16le,utf-16be',
+            'console_command_type' => 'nullable|string|in:,stdin,telnet',
+            'console_command_host' => 'nullable|string|max:191',
+            'console_command_port' => 'nullable|string|max:64',
+            'console_command_password' => 'nullable|string|max:191',
+            'console_connect_timeout' => 'nullable|integer|min:0|max:3600',
+            'prestart_override' => 'nullable',
+            'prestart_script' => 'nullable|string',
         ]);
+
+        if ($failure = $this->validateWorkingDir($data)) {
+            return $this->fail($failure);
+        }
+
+        if ($failure = $this->validateConsole($data)) {
+            return $this->fail($failure);
+        }
+
+        $prestartOverride = $request->boolean('prestart_override');
+        $prestartScript = (string) ($data['prestart_script'] ?? '');
+
+        if ($prestartOverride && trim($prestartScript) === '') {
+            return $this->fail('The pre-start script is switched on but empty, so nothing would run before the server starts.');
+        }
 
         $stopType = $data['stop_type'] ?? null;
         $stopValue = trim((string) ($data['stop_value'] ?? ''));
@@ -301,6 +330,7 @@ class {identifier}ExtensionController extends Controller
         $row = [
             'runtime' => trim((string) ($data['runtime'] ?? '')),
             'startup' => $data['startup'] ?? null,
+            'working_dir' => self::blankToNull($data['working_dir'] ?? ''),
             'stop_type' => $stopType,
             'stop_value' => $stopType ? $stopValue : null,
             'pseudo_console' => $pseudoConsole,
@@ -309,6 +339,24 @@ class {identifier}ExtensionController extends Controller
             'notes' => $data['notes'] ?? null,
             'enabled' => $request->boolean('enabled'),
             'updated_at' => now(),
+
+            // Stored as given, with the type column as the source of truth. A
+            // path left behind by somebody who switched the log source back off
+            // is kept, so switching it on again does not mean retyping it, and is
+            // not served, because consolePayload only reads it when the type says
+            // to.
+            'console_source_type' => self::blankToNull($data['console_source_type'] ?? ''),
+            'console_source_path' => self::blankToNull($data['console_source_path'] ?? ''),
+            'console_source_encoding' => self::blankToNull($data['console_source_encoding'] ?? ''),
+            'console_command_type' => self::blankToNull($data['console_command_type'] ?? ''),
+            'console_command_host' => self::blankToNull($data['console_command_host'] ?? ''),
+            'console_command_port' => self::blankToNull($data['console_command_port'] ?? ''),
+            'console_command_password' => self::blankToNull($data['console_command_password'] ?? ''),
+            'console_connect_timeout' => ($data['console_connect_timeout'] ?? null) !== null
+                ? (int) $data['console_connect_timeout']
+                : null,
+            'prestart_override' => $prestartOverride,
+            'prestart_script' => trim($prestartScript) !== '' ? $prestartScript : null,
         ];
 
         $existing = DB::table(WinWings::TABLE_PROFILES)->where('egg_id', $data['egg_id'])->first();
@@ -382,6 +430,84 @@ class {identifier}ExtensionController extends Controller
         return in_array(strtolower(trim($value)), self::INTERRUPT_SPELLINGS, true) ? 'ctrl_c' : null;
     }
 
+    private static function blankToNull(?string $value): ?string
+    {
+        $value = trim((string) $value);
+
+        return $value !== '' ? $value : null;
+    }
+
+    /**
+     * The console settings, checked for the combinations the node cannot rescue.
+     *
+     * Every one of these fails quietly rather than loudly out there: a log source
+     * with no path streams nothing, a channel with no port cannot deliver a
+     * command, and the server runs perfectly well in both cases. So the server
+     * looks healthy and its console looks broken, which is a support ticket. They
+     * are refused here, where the person who typed them is still looking.
+     *
+     * What is deliberately not checked is whether a path or a port is *correct* —
+     * they are usually egg variables that only mean anything on the node, once
+     * the server they belong to has been substituted into them.
+     */
+    private function validateWorkingDir(array $data): ?string
+    {
+        $dir = trim((string) ($data['working_dir'] ?? ''));
+
+        if ($dir === '') {
+            return null;
+        }
+
+        // The same two mistakes the log path attracts, refused for a sharper
+        // reason: a working directory that escapes would start the game somewhere
+        // outside the server's tree entirely.
+        if (preg_match('#^[/\\\\]#', $dir) || str_contains($dir, ':')) {
+            return 'The working directory must be relative to the server directory — for example ServerFile. An absolute path is refused by the node, which would start the server in its data directory instead.';
+        }
+
+        foreach (preg_split('#[/\\\\]+#', $dir) as $part) {
+            if ($part === '..') {
+                return 'The working directory climbs out of the server directory, which the node refuses. It exists to keep a game\'s own paths inside the sandbox, not to reach past it.';
+            }
+        }
+
+        return null;
+    }
+
+    private function validateConsole(array $data): ?string
+    {
+        $sourceType = trim((string) ($data['console_source_type'] ?? ''));
+        $sourcePath = trim((string) ($data['console_source_path'] ?? ''));
+
+        if ($sourceType === 'file') {
+            if ($sourcePath === '') {
+                return 'Following a log file needs the path to it, relative to the server directory — for example Logs/server/server.log.';
+            }
+
+            // The daemon refuses these too, and would leave a server running with
+            // a console that never says anything. The path is the game's own, so
+            // an absolute one pasted from its documentation is the usual mistake.
+            // Either separator: the node accepts both, so both have to be checked.
+            if (preg_match('#^[/\\\\]#', $sourcePath) || str_contains($sourcePath, ':')) {
+                return 'The log path must be relative to the server directory. An absolute path is refused by the node, which would leave the console silent.';
+            }
+
+            foreach (preg_split('#[/\\\\]+#', $sourcePath) as $part) {
+                if ($part === '..') {
+                    return 'The log path climbs out of the server directory, which the node refuses. A server must not be able to read the rest of the host into its console.';
+                }
+            }
+        }
+
+        if (trim((string) ($data['console_command_type'] ?? '')) === 'telnet') {
+            if (trim((string) ($data['console_command_port'] ?? '')) === '') {
+                return 'A command console needs the port the server listens on. It is usually an egg variable, such as {{TELNET_PORT}}.';
+            }
+        }
+
+        return null;
+    }
+
     /**
      * The condensed form the egg list shows. Deliberately excludes the install
      * script: the list renders every egg on the panel and the scripts are the
@@ -397,10 +523,17 @@ class {identifier}ExtensionController extends Controller
             'enabled' => (bool) $profile->enabled,
             'runtime' => (string) $profile->runtime,
             'has_startup' => trim((string) ($profile->startup ?? '')) !== '',
+            'working_dir' => (string) ($profile->working_dir ?? ''),
             'stop_type' => $profile->stop_type,
             'stop_value' => (string) ($profile->stop_value ?? ''),
             'pseudo_console' => (bool) $profile->pseudo_console,
             'install_override' => (bool) $profile->install_override,
+
+            // Worth a tag in the list: an egg whose console is not its stdio
+            // behaves differently enough that seeing it at a glance matters.
+            'log_source' => (string) ($profile->console_source_type ?? ''),
+            'command_channel' => (string) ($profile->console_command_type ?? ''),
+            'prestart_override' => (bool) ($profile->prestart_override ?? false),
         ];
     }
 

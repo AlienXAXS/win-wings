@@ -80,6 +80,9 @@
 .ww-editor .ww-field { margin-bottom: 12px; }
 .ww-editor .ww-hint { color: #6d8492; font-size: 12px; margin: 4px 0 0; }
 .ww-editor .ww-inherit { color: #6d8492; font-size: 12px; font-family: monospace; word-break: break-all; }
+.ww-advanced { border: 1px solid #3d4d5c; border-radius: 3px; padding: 8px 12px; margin-bottom: 14px; }
+.ww-advanced > summary { cursor: pointer; color: #9fb6c6; }
+.ww-advanced[open] > summary { margin-bottom: 4px; padding-bottom: 6px; border-bottom: 1px solid #3d4d5c; }
 .ww-cols { display: flex; flex-wrap: wrap; margin: 0 -8px; }
 .ww-col { flex: 1 1 240px; padding: 0 8px; }
 .ww-payload { background: #1a2129; border: 1px solid #3d4d5c; border-radius: 3px; padding: 9px 12px; font-family: monospace; font-size: 12px; color: #9fb6c6; white-space: pre; overflow-x: auto; }
@@ -329,6 +332,9 @@
                                         @if($p->runtime)<span class="ww-tag">{{ $p->runtime }}</span>@endif
                                         @if($p->pseudo_console)<span class="ww-tag">ConPTY</span>@endif
                                         @if($p->install_override)<span class="ww-tag">PowerShell install</span>@endif
+                                        @if(($p->console_source_type ?? '') === 'file')<span class="ww-tag">log file</span>@endif
+                                        @if(($p->console_command_type ?? '') === 'telnet')<span class="ww-tag">TCP console</span>@endif
+                                        @if($p->prestart_override ?? false)<span class="ww-tag">pre-start script</span>@endif
                                         <span class="ww-tag {{ $p->enabled ? 'ww-tag-on' : 'ww-tag-off' }}">{{ $p->enabled ? 'enabled' : 'disabled' }}</span>
                                     @endif
                                 </span>
@@ -591,13 +597,32 @@
             enabled: true,
             runtime: '',
             startup: '',
+            working_dir: '',
             stop_type: null,
             stop_value: '',
             pseudo_console: false,
             install_override: false,
             install_script: '',
-            notes: ''
+            notes: '',
+            console_source_type: '',
+            console_source_path: '',
+            console_source_encoding: '',
+            console_command_type: '',
+            console_command_host: '',
+            console_command_port: '',
+            console_command_password: '',
+            console_connect_timeout: null,
+            prestart_override: false,
+            prestart_script: ''
         };
+
+        // The advanced section starts folded, except on a profile that already
+        // uses it: hiding somebody own configuration behind a disclosure they
+        // have to remember to open is how a setting gets edited by accident.
+        var advancedInUse = !!(profile.console_source_type
+            || profile.console_command_type
+            || profile.prestart_override
+            || (profile.prestart_script || '').trim() !== '');
 
         var known = RUNTIMES.slice();
 
@@ -666,10 +691,95 @@
             + '    <span class="ww-inherit">' + escapeHtml(data.egg.startup) + '</span></p>'
             + '  </div>'
 
+            + '  <div class="ww-field">'
+            + '    <label>Working directory <span class="text-muted">(optional)</span></label>'
+            + '    <input type="text" class="form-control" data-role="working_dir" spellcheck="false" placeholder="the server data directory">'
+            + '    <p class="ww-hint">Where the server process is started, relative to its data directory, and'
+            + '    relative to which the startup command above is resolved. Empty is the data directory itself,'
+            + '    which is what nearly every egg wants.<br>'
+            + '    Set it for a game that builds its own paths by climbing out of wherever it was started &mdash;'
+            + '    a log root at <code>..\Logs</code> is the usual shape. From the data directory that lands in'
+            + '    the server root, which the server account cannot write and must not be able to. Naming the'
+            + '    folder the game was installed into puts it back inside the sandbox. With a working directory'
+            + '    of <code>ServerFile</code>, the startup command is <code>MyServer.exe</code>, not'
+            + '    <code>ServerFile\MyServer.exe</code>.<br>'
+            + '    Applies to the server process only: a steamcmd update and the log tail below both stay at the'
+            + '    data directory, since they are what install and read the content this names.</p>'
+            + '  </div>'
+
             + '  <div class="ww-check">'
             + '    <label><input type="checkbox" data-role="pseudo_console"> Allocate a ConPTY instead of pipes</label>'
             + '    <p class="text-muted">Only for a process that inspects its own stdout and behaves differently when it is not a console, steamcmd being the usual one. It costs a stream of VT escapes in place of clean lines.</p>'
             + '  </div>'
+
+            + '  <hr>'
+
+            /*
+             * Advanced settings, folded away by default and opened when the
+             * profile already uses them.
+             *
+             * Everything here exists for the same small family of eggs: the ones
+             * whose Linux startup line is a shell pipeline rather than a command,
+             * because the game writes nothing to stdout and reads nothing from
+             * stdin. Nearly every egg wants none of it, and an editor that put
+             * these fields in front of everybody would suggest otherwise.
+             */
+            + '  <details class="ww-advanced"' + (advancedInUse ? ' open' : '') + '>'
+            + '    <summary><strong>Advanced settings</strong> &mdash; console redirection and a pre-start script</summary>'
+            + '    <p class="ww-hint" style="margin-top:8px;">Only for a game that does not use its own stdin and stdout &mdash; one that writes its log to a file and takes commands on a port it opens itself. On Linux those eggs are started through a shell pipeline (<code>tail -F</code> into stdout, a telnet client on stdin); here the node does both jobs itself, so the game process stays the process it supervises and the exit code stays the game own. Leave all of it alone otherwise.</p>'
+
+            + '    <div class="ww-cols">'
+            + '      <div class="ww-col">'
+            + '        <div class="ww-field">'
+            + '          <label>Console output</label>'
+            + '          <select class="form-control" data-role="console_source_type">'
+            + '            <option value="">The process own output (normal)</option>'
+            + '            <option value="file">Also follow a log file</option>'
+            + '          </select>'
+            + '          <div data-role="source_fields" style="display:none; margin-top:6px;">'
+            + '            <input type="text" class="form-control" data-role="console_source_path" maxlength="512" placeholder="Logs/server/server.log">'
+            + '            <select class="form-control" data-role="console_source_encoding" style="margin-top:6px;">'
+            + '              <option value="">utf-8</option>'
+            + '              <option value="utf-16le">utf-16le</option>'
+            + '              <option value="utf-16be">utf-16be</option>'
+            + '            </select>'
+            + '            <p class="ww-hint">Relative to the server directory; an absolute path is refused. Both <code>@{{VAR}}</code> and <code>${VAR}</code> are substituted. The node follows the <em>name</em>, so a log the game deletes and recreates on boot is followed into the new file, and whatever was there from the last run is not replayed. Pick utf-16 only if the console fills with gaps between every character, which is what a .NET server writing its log on the defaults produces.</p>'
+            + '          </div>'
+            + '        </div>'
+            + '      </div>'
+            + '      <div class="ww-col">'
+            + '        <div class="ww-field">'
+            + '          <label>Console commands</label>'
+            + '          <select class="form-control" data-role="console_command_type">'
+            + '            <option value="">The process stdin (normal)</option>'
+            + '            <option value="telnet">A TCP console the server listens on</option>'
+            + '          </select>'
+            + '          <div data-role="command_fields" style="display:none; margin-top:6px;">'
+            + '            <input type="text" class="form-control" data-role="console_command_port" maxlength="64" placeholder="@{{TELNET_PORT}}">'
+            + '            <input type="text" class="form-control" data-role="console_command_password" maxlength="191" style="margin-top:6px;" placeholder="password, if the console asks for one">'
+            + '            <div style="display:flex; gap:6px; margin-top:6px;">'
+            + '              <input type="text" class="form-control" data-role="console_command_host" maxlength="191" placeholder="127.0.0.1">'
+            + '              <input type="number" class="form-control" data-role="console_connect_timeout" min="0" max="3600" placeholder="300" style="flex:0 0 120px;">'
+            + '            </div>'
+            + '            <p class="ww-hint">The port is usually an egg variable, since every server on the node has a different one. Everything the console sends back appears in the server console, its banner included &mdash; which is how you tell a connected channel from a silent one. The stop command goes here too, so this egg stop must be a command rather than a signal. The number beside the host is how long the node waits for the port to open after the server starts: a world-loading time, not a network timeout, so leave it blank unless five minutes is not enough.</p>'
+            + '          </div>'
+            + '        </div>'
+            + '      </div>'
+            + '    </div>'
+
+            + '    <p class="ww-hint" data-role="console_warning" style="display:none; color:#d29a2b;"></p>'
+
+            + '    <div class="ww-check">'
+            + '      <label><input type="checkbox" data-role="prestart_override"> Run a PowerShell script before every boot</label>'
+            + '      <p class="text-muted">Runs to completion before the startup command, in the server directory, as the server own account, with its output on the console &mdash; after any steamcmd update, so it can patch files the update has just replaced. For preparing a server, not for running one: writing a config file out of the egg variables is what it is for. A non-zero exit is logged and the server starts anyway, because a server with a stale config is more use than one that will not boot.</p>'
+            + '    </div>'
+
+            + '    <div class="ww-field" data-role="prestart_field" style="display:none;">'
+            + '      <label>Pre-start script</label>'
+            + '      <textarea class="form-control" rows="12" data-role="prestart_script" spellcheck="false"></textarea>'
+            + '      <p class="ww-hint">The server directory is the working directory and <code>$env:SERVER_DIR</code>. The egg variables are in the environment, same as during an install.</p>'
+            + '    </div>'
+            + '  </details>'
 
             + '  <hr>'
 
@@ -714,6 +824,7 @@
         field('runtime').value = profile.runtime || '';
         field('startup').value = profile.startup || '';
         field('startup').placeholder = data.egg.startup || '';
+        field('working_dir').value = profile.working_dir || '';
         field('stop_type').value = profile.stop_type || '';
         field('stop_value').value = profile.stop_type === 'signal' ? '' : (profile.stop_value || '');
 
@@ -726,6 +837,50 @@
         field('notes').value = profile.notes || '';
         field('notes').placeholder = 'Why this profile looks the way it does';
         field('enabled').checked = !!profile.enabled;
+
+        field('console_source_type').value = profile.console_source_type === 'file' ? 'file' : '';
+        field('console_source_path').value = profile.console_source_path || '';
+        field('console_source_encoding').value = profile.console_source_encoding || '';
+        field('console_command_type').value = profile.console_command_type === 'telnet' ? 'telnet' : '';
+        field('console_command_host').value = profile.console_command_host || '';
+        field('console_command_port').value = profile.console_command_port || '';
+        field('console_command_password').value = profile.console_command_password || '';
+        field('console_connect_timeout').value = profile.console_connect_timeout || '';
+        field('prestart_override').checked = !!profile.prestart_override;
+        field('prestart_script').value = profile.prestart_script || '';
+
+        /*
+         * Show only the fields the chosen console arrangement actually uses, and
+         * warn about the one combination that saves happily and then fails on the
+         * node: a signal stop on a server whose console is a socket. There is
+         * nothing to raise an interrupt on, so the stop becomes a kill and the
+         * world is not saved.
+         */
+        function syncConsole() {
+            var source = field('console_source_type').value;
+            var commands = field('console_command_type').value;
+
+            field('source_fields').style.display = source === 'file' ? '' : 'none';
+            field('command_fields').style.display = commands === 'telnet' ? '' : 'none';
+            field('prestart_field').style.display = field('prestart_override').checked ? '' : 'none';
+
+            var warning = field('console_warning');
+            var message = '';
+
+            if (commands === 'telnet' && field('stop_type').value !== 'command') {
+                message = 'This server takes its commands over a socket, so its stop has to be a command sent there. '
+                    + 'A signal stop has no console to interrupt and the node will kill the server instead, losing whatever it had not saved.';
+            }
+
+            warning.style.display = message ? '' : 'none';
+            warning.textContent = message;
+        }
+
+        field('console_source_type').addEventListener('change', syncConsole);
+        field('console_command_type').addEventListener('change', syncConsole);
+        field('prestart_override').addEventListener('change', syncConsole);
+        field('stop_type').addEventListener('change', syncConsole);
+        syncConsole();
 
         // Which of the two stop controls is the live one.
         function stopValue() {
@@ -816,13 +971,24 @@
                 egg_id: eggId,
                 runtime: field('runtime').value,
                 startup: field('startup').value,
+                working_dir: field('working_dir').value,
                 stop_type: field('stop_type').value,
                 stop_value: stopValue(),
                 pseudo_console: field('pseudo_console').checked,
                 install_override: field('install_override').checked,
                 install_script: field('install_script').value,
                 notes: field('notes').value,
-                enabled: field('enabled').checked
+                enabled: field('enabled').checked,
+                console_source_type: field('console_source_type').value,
+                console_source_path: field('console_source_path').value,
+                console_source_encoding: field('console_source_encoding').value,
+                console_command_type: field('console_command_type').value,
+                console_command_host: field('console_command_host').value,
+                console_command_port: field('console_command_port').value,
+                console_command_password: field('console_command_password').value,
+                console_connect_timeout: field('console_connect_timeout').value,
+                prestart_override: field('prestart_override').checked,
+                prestart_script: field('prestart_script').value
             }).then(function (result) {
                 button.disabled = false;
                 say(result.message, result.success);
@@ -872,6 +1038,7 @@
         var payload = {
             runtime: field('runtime').value,
             startup: field('startup').value,
+            working_dir: field('working_dir').value,
             pseudo_console: field('pseudo_console').checked
         };
 
@@ -880,6 +1047,36 @@
                 type: field('stop_type').value,
                 value: field('stop_type').value === 'signal' ? field('stop_signal').value : field('stop_value').value
             };
+        }
+
+        // Each half is sent only when it is set. The node reads a missing half as
+        // the ordinary arrangement, so the preview has to show it missing too.
+        var consoleCfg = {};
+
+        if (field('console_source_type').value === 'file') {
+            consoleCfg.source = {
+                type: 'file',
+                path: field('console_source_path').value,
+                encoding: field('console_source_encoding').value || 'utf-8'
+            };
+        }
+
+        if (field('console_command_type').value === 'telnet') {
+            consoleCfg.commands = {
+                type: 'telnet',
+                host: field('console_command_host').value,
+                port: field('console_command_port').value,
+                password: field('console_command_password').value ? '(set)' : '',
+                connect_timeout_seconds: parseInt(field('console_connect_timeout').value, 10) || 0
+            };
+        }
+
+        if (consoleCfg.source || consoleCfg.commands) {
+            payload.console = consoleCfg;
+        }
+
+        if (field('prestart_override').checked && field('prestart_script').value.trim() !== '') {
+            payload.pre_start_script = '(the ' + field('prestart_script').value.length + ' character PowerShell script above)';
         }
 
         var overriding = field('install_override').checked && field('install_script').value.trim() !== '';
@@ -908,6 +1105,11 @@
             lines.push('An empty startup means the node uses the Panel value: ' + (data.egg.startup || '(none)'));
         }
 
+        if (payload.working_dir !== '') {
+            lines.push('');
+            lines.push('The server process starts in ' + payload.working_dir + ', relative to its data directory, and the startup command is resolved against it. A steamcmd update and the log tail still run from the data directory.');
+        }
+
         if (field('stop_type').value === 'signal' && !field('pseudo_console').checked) {
             lines.push('');
             lines.push('This will not save: a Ctrl+C stop needs the pseudo console, or there is no console to deliver the interrupt through.');
@@ -916,6 +1118,11 @@
         if (field('stop_type').value === '') {
             lines.push('');
             lines.push('With no stop configured the node falls back to the egg. A POSIX signal there is not deliverable, and the server is killed.');
+        }
+
+        if (payload.console && payload.console.commands && field('stop_type').value !== 'command') {
+            lines.push('');
+            lines.push('This server takes commands over a socket but its stop is not a command, so there is nothing to send there and the node will kill it instead.');
         }
 
         return lines.join(NL);
@@ -945,6 +1152,18 @@
 
         if (summary.install_override) {
             tags.push('<span class="ww-tag">PowerShell install</span>');
+        }
+
+        if (summary.log_source === 'file') {
+            tags.push('<span class="ww-tag">log file</span>');
+        }
+
+        if (summary.command_channel === 'telnet') {
+            tags.push('<span class="ww-tag">TCP console</span>');
+        }
+
+        if (summary.prestart_override) {
+            tags.push('<span class="ww-tag">pre-start script</span>');
         }
 
         tags.push('<span class="ww-tag ' + (summary.enabled ? 'ww-tag-on' : 'ww-tag-off') + '">'

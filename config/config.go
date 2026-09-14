@@ -295,6 +295,11 @@ type Configuration struct {
 	System  SystemConfiguration  `json:"system" yaml:"system"`
 	Runtime RuntimeConfiguration `json:"runtime" yaml:"runtime"`
 
+	// StatsAgent is the node load agent the Panel's Free Servers extension
+	// polls. Excluded from JSON so a configuration push from the Panel, which
+	// knows nothing of it, can neither clear nor overwrite it.
+	StatsAgent StatsAgentConfiguration `json:"-" yaml:"stats_agent"`
+
 	// Defines internal throttling configurations for server processes to prevent
 	// someone from running an endless loop that spams data to logs.
 	Throttles ConsoleThrottles
