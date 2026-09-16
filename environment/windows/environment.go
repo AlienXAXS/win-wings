@@ -79,6 +79,11 @@ type Metadata struct {
 	// re-fetched on every sync, and there is nowhere in the Panel's own server
 	// configuration for it to live.
 	PreStartScript string
+
+	// PreStopScript is PowerShell run to completion when the server is asked to
+	// stop, before the stop mechanism itself. Held here as PreStartScript is,
+	// and for the same reason.
+	PreStopScript string
 }
 
 // Environment supervises one server via its worker.
@@ -255,6 +260,14 @@ func (e *Environment) SetConsole(c remote.ConsoleProfile) {
 func (e *Environment) SetPreStartScript(s string) {
 	e.mu.Lock()
 	e.meta.PreStartScript = s
+	e.mu.Unlock()
+}
+
+// SetPreStopScript updates the PowerShell run ahead of each stop. Empty removes
+// it.
+func (e *Environment) SetPreStopScript(s string) {
+	e.mu.Lock()
+	e.meta.PreStopScript = s
 	e.mu.Unlock()
 }
 

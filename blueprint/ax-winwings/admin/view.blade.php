@@ -335,6 +335,7 @@
                                         @if(($p->console_source_type ?? '') === 'file')<span class="ww-tag">log file</span>@endif
                                         @if(($p->console_command_type ?? '') === 'telnet')<span class="ww-tag">TCP console</span>@endif
                                         @if($p->prestart_override ?? false)<span class="ww-tag">pre-start script</span>@endif
+                                        @if($p->prestop_override ?? false)<span class="ww-tag">pre-stop script</span>@endif
                                         <span class="ww-tag {{ $p->enabled ? 'ww-tag-on' : 'ww-tag-off' }}">{{ $p->enabled ? 'enabled' : 'disabled' }}</span>
                                     @endif
                                 </span>
@@ -613,7 +614,9 @@
             console_command_password: '',
             console_connect_timeout: null,
             prestart_override: false,
-            prestart_script: ''
+            prestart_script: '',
+            prestop_override: false,
+            prestop_script: ''
         };
 
         // The advanced section starts folded, except on a profile that already
@@ -622,7 +625,9 @@
         var advancedInUse = !!(profile.console_source_type
             || profile.console_command_type
             || profile.prestart_override
-            || (profile.prestart_script || '').trim() !== '');
+            || (profile.prestart_script || '').trim() !== ''
+            || profile.prestop_override
+            || (profile.prestop_script || '').trim() !== '');
 
         var known = RUNTIMES.slice();
 
@@ -779,6 +784,17 @@
             + '      <textarea class="form-control" rows="12" data-role="prestart_script" spellcheck="false"></textarea>'
             + '      <p class="ww-hint">The server directory is the working directory and <code>$env:SERVER_DIR</code>. The egg variables are in the environment, same as during an install.</p>'
             + '    </div>'
+
+            + '    <div class="ww-check">'
+            + '      <label><input type="checkbox" data-role="prestop_override"> Run a PowerShell script when the server is stopped</label>'
+            + '      <p class="text-muted">Runs to completion when a stop is requested, before the stop method above is tried, in the server directory, as the server own account, with its output on the console. For the servers whose clean shutdown is neither a line on stdin nor a console interrupt &mdash; an RCON command, a web endpoint, a save that has to be asked for first. If the server exits during or after the script the stop is done; otherwise the stop method above follows as if the script had not run. A script that overruns the stop timeout is killed and the stop carries on. Not run when a server is killed, nor when a stop arrives before the server has finished starting.</p>'
+            + '    </div>'
+
+            + '    <div class="ww-field" data-role="prestop_field" style="display:none;">'
+            + '      <label>Pre-stop script</label>'
+            + '      <textarea class="form-control" rows="12" data-role="prestop_script" spellcheck="false"></textarea>'
+            + '      <p class="ww-hint">Same environment as the pre-start script, plus <code>$env:SERVER_PID</code>, the process id of the server being stopped &mdash; wait on it after asking the server to exit, so the node knows the script worked.</p>'
+            + '    </div>'
             + '  </details>'
 
             + '  <hr>'
@@ -848,6 +864,8 @@
         field('console_connect_timeout').value = profile.console_connect_timeout || '';
         field('prestart_override').checked = !!profile.prestart_override;
         field('prestart_script').value = profile.prestart_script || '';
+        field('prestop_override').checked = !!profile.prestop_override;
+        field('prestop_script').value = profile.prestop_script || '';
 
         /*
          * Show only the fields the chosen console arrangement actually uses, and
@@ -863,6 +881,7 @@
             field('source_fields').style.display = source === 'file' ? '' : 'none';
             field('command_fields').style.display = commands === 'telnet' ? '' : 'none';
             field('prestart_field').style.display = field('prestart_override').checked ? '' : 'none';
+            field('prestop_field').style.display = field('prestop_override').checked ? '' : 'none';
 
             var warning = field('console_warning');
             var message = '';
@@ -879,6 +898,7 @@
         field('console_source_type').addEventListener('change', syncConsole);
         field('console_command_type').addEventListener('change', syncConsole);
         field('prestart_override').addEventListener('change', syncConsole);
+        field('prestop_override').addEventListener('change', syncConsole);
         field('stop_type').addEventListener('change', syncConsole);
         syncConsole();
 
@@ -988,7 +1008,9 @@
                 console_command_password: field('console_command_password').value,
                 console_connect_timeout: field('console_connect_timeout').value,
                 prestart_override: field('prestart_override').checked,
-                prestart_script: field('prestart_script').value
+                prestart_script: field('prestart_script').value,
+                prestop_override: field('prestop_override').checked,
+                prestop_script: field('prestop_script').value
             }).then(function (result) {
                 button.disabled = false;
                 say(result.message, result.success);
@@ -1079,6 +1101,10 @@
             payload.pre_start_script = '(the ' + field('prestart_script').value.length + ' character PowerShell script above)';
         }
 
+        if (field('prestop_override').checked && field('prestop_script').value.trim() !== '') {
+            payload.pre_stop_script = '(the ' + field('prestop_script').value.length + ' character PowerShell script above)';
+        }
+
         var overriding = field('install_override').checked && field('install_script').value.trim() !== '';
 
         var lines = [];
@@ -1164,6 +1190,10 @@
 
         if (summary.prestart_override) {
             tags.push('<span class="ww-tag">pre-start script</span>');
+        }
+
+        if (summary.prestop_override) {
+            tags.push('<span class="ww-tag">pre-stop script</span>');
         }
 
         tags.push('<span class="ww-tag ' + (summary.enabled ? 'ww-tag-on' : 'ww-tag-off') + '">'

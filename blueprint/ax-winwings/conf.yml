@@ -3,7 +3,7 @@ info:
   identifier: "axwinwings"
   description: "Serves the Panel API that win-wings (the Windows-native wings fork) needs: per-egg Windows profiles, PowerShell install scripts, and a creation gate for eggs that have no Windows profile."
   flags: "hasInstallScript,hasRemovalScript"
-  version: "1.1.0"
+  version: "1.2.0"
   target: "beta-2026-01"
   author: "AlienX"
   icon: "icon.jpg"

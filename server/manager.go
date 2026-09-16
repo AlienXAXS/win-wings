@@ -321,6 +321,7 @@ func (s *Server) applyWindowsProfile(meta *winenv.Metadata) error {
 	meta.PseudoConsole = profile.PseudoConsole
 	meta.Console = profile.Console
 	meta.PreStartScript = profile.PreStartScript
+	meta.PreStopScript = profile.PreStopScript
 	meta.WorkingDir = profile.WorkingDir
 
 	// A Windows-specific startup command replaces the Panel's, which is almost
@@ -341,6 +342,7 @@ func (s *Server) applyWindowsProfile(meta *winenv.Metadata) error {
 		"log_source":       profile.Console.Source.Type,
 		"command_channel":  profile.Console.Commands.Type,
 		"pre_start_script": profile.PreStartScript != "",
+		"pre_stop_script":  profile.PreStopScript != "",
 		"working_dir":      profile.WorkingDir,
 	}).Debug("applied the egg's windows profile")
 

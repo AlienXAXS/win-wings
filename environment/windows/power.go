@@ -281,24 +281,10 @@ func (e *Environment) Start(ctx context.Context) error {
 	e.SetState(environment.ProcessStartingState)
 
 	e.mu.RLock()
-	pty, runtimeName := e.meta.PseudoConsole, e.meta.Runtime
+	pty := e.meta.PseudoConsole
 	e.mu.RUnlock()
 
-	// Put the egg's runtime ahead of the host PATH so that a startup line saying
-	// "java" gets the version this egg asked for rather than whichever JRE was
-	// installed most recently.
-	// The Panel's variables layered over a working Windows environment. Without
-	// the base, the process gets no SystemRoot, no TEMP and no PATH, because a
-	// non-NULL environment block replaces the parent's rather than extending it.
-	envVars := winenv.Merge(
-		winenv.Base(winenv.Paths{
-			Data:     e.workingDirectory(),
-			Temp:     e.tempDirectory(),
-			Steamcmd: e.steamcmdDirectory(),
-		}),
-		e.Config().EnvironmentVariables(),
-	)
-	envVars = config.Get().Runtime.ApplyRuntime(runtimeName, envVars)
+	envVars := e.processEnvironment()
 
 	argv, err := e.resolveStartup(envVars)
 	if err != nil {
@@ -484,10 +470,39 @@ func (e *Environment) Attach(ctx context.Context) error {
 	return err
 }
 
+// processEnvironment builds the environment block the server's processes run
+// with: the Panel's variables layered over a working Windows environment, with
+// the egg's runtime ahead of the host PATH.
+//
+// Without the base, a process gets no SystemRoot, no TEMP and no PATH, because
+// a non-NULL environment block replaces the parent's rather than extending it.
+// The runtime goes first on PATH so that a startup line saying "java" gets the
+// version this egg asked for rather than whichever JRE was installed most
+// recently.
+//
+// Built fresh for every use rather than once per run: the pre-stop script runs
+// against the variables as they are at stop time, which is what the Panel is
+// showing the operator who edited them.
+func (e *Environment) processEnvironment() []string {
+	e.mu.RLock()
+	runtimeName := e.meta.Runtime
+	e.mu.RUnlock()
+
+	envVars := winenv.Merge(
+		winenv.Base(winenv.Paths{
+			Data:     e.workingDirectory(),
+			Temp:     e.tempDirectory(),
+			Steamcmd: e.steamcmdDirectory(),
+		}),
+		e.Config().EnvironmentVariables(),
+	)
+	return config.Get().Runtime.ApplyRuntime(runtimeName, envVars)
+}
+
 // Stop asks the server to shut down gracefully.
 func (e *Environment) Stop(ctx context.Context) error {
 	e.mu.RLock()
-	c, stop := e.client, e.meta.Stop
+	c, stop, pty := e.client, e.meta.Stop, e.meta.PseudoConsole
 	e.mu.RUnlock()
 
 	if c == nil {
@@ -499,6 +514,10 @@ func (e *Environment) Stop(ctx context.Context) error {
 	e.SetState(environment.ProcessStoppingState)
 
 	msg := wire.Stop{TimeoutSeconds: 30}
+
+	// The egg's own way of stopping, tried before the generic one. The worker
+	// skips it for a run that has not reached the server yet.
+	msg.PreStop = e.resolveEggPreStop(e.processEnvironment(), pty || config.Get().Runtime.Console.PseudoConsole)
 	switch stop.Type {
 	case remote.ProcessStopCommand:
 		msg.Mode = wire.StopCommand
@@ -537,6 +556,7 @@ func (e *Environment) Stop(ctx context.Context) error {
 		"mode":       msg.Mode,
 		"command":    msg.Value,
 		"timeout":    msg.TimeoutSeconds,
+		"pre_stop":   msg.PreStop != nil,
 	}).Debug("asking the worker to stop the server")
 
 	return c.Stop(msg)

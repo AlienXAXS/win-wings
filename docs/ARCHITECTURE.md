@@ -139,6 +139,15 @@ every boot. The daemon stages it into the server root, which the server account
 can read and cannot write, exactly as it does the install script, for the same
 reason: it runs as that account before every single boot.
 
+The stop has a counterpart, `pre_stop_script`, sent as `PreStop` in the stop
+message (`environment/windows/prestop.go`, `internal/worker/prestop.go`). It
+runs ahead of the profile's stop mechanism, in a job object of its own — the
+server's job is torn down the moment the server exits, and a script whose RCON
+command has just worked must not be killed by its own success — and is bounded
+by the stop timeout so that a hung script cannot make a server unstoppable. The
+server exiting during or after it is the stop succeeding; otherwise the
+escalation continues as if the script had not run.
+
 ## Consoles that are not the process's stdio
 
 A few games write their log only to a file and take commands only on a TCP port

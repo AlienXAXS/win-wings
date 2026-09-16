@@ -182,6 +182,45 @@ type Stop struct {
 	// escalates to terminating the Job Object. Zero means wait indefinitely,
 	// which the daemon should avoid.
 	TimeoutSeconds int `json:"timeout_seconds"`
+
+	// PreStop is a command run to completion before Mode is attempted, with its
+	// output on the console. Nil means none.
+	//
+	// It exists for the servers whose clean shutdown is neither a line on stdin
+	// nor a console interrupt -- an RCON command, a call to a web endpoint --
+	// which the Linux eggs did in a shell trap around the game. The script runs
+	// while the server is still up, and the server exiting during or after it
+	// is the stop succeeding; otherwise the worker carries on with Mode as if
+	// the script had not run. It is not attempted for a run still in its
+	// pre-start commands, because there is no server for it to talk to.
+	PreStop *PreStopCommand `json:"pre_stop,omitempty"`
+}
+
+// PreStopCommand is one command run to completion ahead of a stop.
+//
+// It carries its own environment and account rather than reusing the run's,
+// for the same reason Start carries them: the egg's variables are rebuilt
+// on every sync and can have changed since the boot, and account credentials
+// belong in a message, not in the worker's memory for the life of a run.
+type PreStopCommand struct {
+	// Argv is the resolved command, already split by the daemon.
+	Argv []string `json:"argv"`
+	// Label names the command for the log.
+	Label string `json:"label,omitempty"`
+	// Env is the command's environment as "KEY=VALUE" strings. The worker adds
+	// SERVER_PID, the process id of the server being stopped.
+	Env []string `json:"env"`
+	// TimeoutSeconds bounds the command. When it elapses the command is killed
+	// and the stop carries on without it. Zero uses the stop's own timeout.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// PseudoConsole gives the command a ConPTY rather than pipes, as the run
+	// had.
+	PseudoConsole bool `json:"pseudo_console,omitempty"`
+	// Username and Password name the local account to run the command as.
+	// Empty runs it as the worker's own account. See Start for why these are
+	// carried in the message.
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // Start launches the configured process.

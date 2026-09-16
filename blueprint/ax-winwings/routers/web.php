@@ -81,6 +81,8 @@ Route::middleware(['web', 'auth'])->group(function () {
                 'console_connect_timeout' => $profile->console_connect_timeout ?? null,
                 'prestart_override' => (bool) ($profile->prestart_override ?? false),
                 'prestart_script' => (string) ($profile->prestart_script ?? ''),
+                'prestop_override' => (bool) ($profile->prestop_override ?? false),
+                'prestop_script' => (string) ($profile->prestop_script ?? ''),
             ] : null,
 
             // Exactly what GET /api/remote/windows/servers/{uuid}/profile would

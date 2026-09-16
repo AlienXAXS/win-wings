@@ -90,7 +90,7 @@ func (e *Environment) resolveEggPreStart() []string {
 		return nil
 	}
 
-	path, err := e.stagePreStartScript(script)
+	path, err := e.stageScript(preStartScriptName, script)
 	if err != nil {
 		e.log().WithField("error", err).Error(
 			"could not stage this egg's pre-start script; the server is starting without it")
@@ -109,16 +109,16 @@ func (e *Environment) resolveEggPreStart() []string {
 	return winproc.PowerShellArgv(powershell, path)
 }
 
-// stagePreStartScript writes the script where the server can read it but not
-// write it, and returns its path.
+// stageScript writes an egg script where the server can read it but not write
+// it, and returns its path.
 //
-// The reasoning is the installer's, and it matters more here: this script runs
-// before every single boot, under the server's own account. Staged in the
+// The reasoning is the installer's, and it matters more here: these scripts run
+// on every single boot and stop, under the server's own account. Staged in the
 // server root -- which the daemon owns and the server has no access to -- with
 // read and execute granted on this one file. A script inside the server's data
 // directory would be a server rewriting what its next boot executes.
-func (e *Environment) stagePreStartScript(script string) (string, error) {
-	path := filepath.Join(e.ServerRoot(), preStartScriptName)
+func (e *Environment) stageScript(name, script string) (string, error) {
+	path := filepath.Join(e.ServerRoot(), name)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err

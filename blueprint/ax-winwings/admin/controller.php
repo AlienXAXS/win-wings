@@ -265,6 +265,8 @@ class {identifier}ExtensionController extends Controller
             'console_connect_timeout' => 'nullable|integer|min:0|max:3600',
             'prestart_override' => 'nullable',
             'prestart_script' => 'nullable|string',
+            'prestop_override' => 'nullable',
+            'prestop_script' => 'nullable|string',
         ]);
 
         if ($failure = $this->validateWorkingDir($data)) {
@@ -280,6 +282,13 @@ class {identifier}ExtensionController extends Controller
 
         if ($prestartOverride && trim($prestartScript) === '') {
             return $this->fail('The pre-start script is switched on but empty, so nothing would run before the server starts.');
+        }
+
+        $prestopOverride = $request->boolean('prestop_override');
+        $prestopScript = (string) ($data['prestop_script'] ?? '');
+
+        if ($prestopOverride && trim($prestopScript) === '') {
+            return $this->fail('The pre-stop script is switched on but empty, so nothing would run when the server is stopped.');
         }
 
         $stopType = $data['stop_type'] ?? null;
@@ -357,6 +366,8 @@ class {identifier}ExtensionController extends Controller
                 : null,
             'prestart_override' => $prestartOverride,
             'prestart_script' => trim($prestartScript) !== '' ? $prestartScript : null,
+            'prestop_override' => $prestopOverride,
+            'prestop_script' => trim($prestopScript) !== '' ? $prestopScript : null,
         ];
 
         $existing = DB::table(WinWings::TABLE_PROFILES)->where('egg_id', $data['egg_id'])->first();
@@ -534,6 +545,7 @@ class {identifier}ExtensionController extends Controller
             'log_source' => (string) ($profile->console_source_type ?? ''),
             'command_channel' => (string) ($profile->console_command_type ?? ''),
             'prestart_override' => (bool) ($profile->prestart_override ?? false),
+            'prestop_override' => (bool) ($profile->prestop_override ?? false),
         ];
     }
 

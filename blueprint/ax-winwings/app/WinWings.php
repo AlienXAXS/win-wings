@@ -253,6 +253,12 @@ class WinWings
             $payload['pre_start_script'] = $prestart;
         }
 
+        $prestop = self::prestopScript($profile);
+
+        if ($prestop !== null) {
+            $payload['pre_stop_script'] = $prestop;
+        }
+
         return $payload;
     }
 
@@ -304,6 +310,21 @@ class WinWings
         }
 
         $script = (string) ($profile->prestart_script ?? '');
+
+        return trim($script) !== '' ? $script : null;
+    }
+
+    /**
+     * The pre-stop script, or null when this egg has none. Gated on its own
+     * switch for the same reason the pre-start script is.
+     */
+    public static function prestopScript(object $profile): ?string
+    {
+        if (!($profile->prestop_override ?? false)) {
+            return null;
+        }
+
+        $script = (string) ($profile->prestop_script ?? '');
 
         return trim($script) !== '' ? $script : null;
     }

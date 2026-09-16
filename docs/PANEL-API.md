@@ -66,9 +66,11 @@ Returns the Windows profile for the egg the given server uses.
 }
 ```
 
-`working_dir`, `console` and `pre_start_script` may also be present. Both are for the handful of
-eggs that need them and are described under [Consoles that are not stdio](#consoles-that-are-not-stdio)
-and [Pre-start scripts](#pre-start-scripts); omitting them is the normal case.
+`working_dir`, `console`, `pre_start_script` and `pre_stop_script` may also be
+present. All are for the handful of eggs that need them and are described under
+[Consoles that are not stdio](#consoles-that-are-not-stdio),
+[Pre-start scripts](#pre-start-scripts) and [Pre-stop scripts](#pre-stop-scripts);
+omitting them is the normal case.
 
 **404 response** means no profile is configured for this egg. What the daemon
 does then depends on `runtime.require_windows_profile`:
@@ -94,6 +96,7 @@ plugin outage cannot stop a node from booting servers it already knows about.
 | `pseudo_console` | bool | Allocate a ConPTY rather than pipes. Only for processes that detect a non-console stdout — steamcmd being the usual case. |
 | `console` | object | Where console output is read from and where commands are written to. Omit for the ordinary arrangement, which is the process's own stdio. |
 | `pre_start_script` | string | PowerShell run to completion before every boot. Omit or leave empty for none. |
+| `pre_stop_script` | string | PowerShell run to completion when a stop is requested, before `stop` is tried. Omit or leave empty for none. |
 
 Omitting `stop` entirely uses the egg's standard stop configuration.
 
@@ -140,9 +143,10 @@ Three mechanisms exist, and they are not equivalent.
 | `signal` | `ctrl_break`, `break`, `sigquit` | Raises `CTRL_BREAK_EVENT` instead. Weaker: fewer programs handle it, and those that do often treat it as "dump state and continue". Only ask for this if Ctrl+C is known not to work. |
 | omitted, or unrecognised | — | The server is killed. |
 
-Every attempt escalates on a timeout: the chosen mechanism, then CTRL_BREAK,
-then terminating the Job Object. Each step and its outcome is logged, including
-how long the server was given.
+Every attempt escalates on a timeout: the egg's [pre-stop script](#pre-stop-scripts)
+if it has one, then the chosen mechanism, then CTRL_BREAK, then terminating the
+Job Object. Each step and its outcome is logged, including how long the server
+was given.
 
 An unmodified egg carrying a POSIX signal name needs no special handling: any
 `signal` stop becomes a Ctrl+C, which is the closest thing Windows has and is
@@ -242,6 +246,40 @@ variables on every boot is the case it exists for.
 It does not replace the startup command, and a script that tries to launch the
 game itself will have it killed: the pre-start step is waited for, and the server
 is only launched once it exits.
+
+#### Pre-stop scripts
+
+`pre_stop_script` is PowerShell run to completion when the server is asked to
+stop, before the profile's `stop` mechanism is tried, in the server's data
+directory, as the server's own account, with its output on the console. It is
+for the servers whose clean shutdown is neither a line on stdin nor a console
+interrupt: an RCON command, a call to a web endpoint, a save that has to be
+asked for first. Their Linux eggs did this in a shell `trap` wrapped around the
+game; there is no shell around the game here, so the daemon runs the script
+instead.
+
+- The server is still running when it starts. Its process id is exported as
+  `SERVER_PID`, so the script can wait for it to go away after asking it to.
+  A script that returns while the server is still up has not stopped it.
+- The environment is the pre-start script's — `SERVER_DIR` and the egg's
+  variables, rebuilt at stop time so a variable edited while the server ran is
+  the value the script sees.
+- If the server has exited by the time the script returns, the stop is done
+  and nothing escalates. Otherwise `stop` follows as if the script had not run,
+  with the usual escalation after it.
+- It is bounded by the stop timeout. A script still running when that elapses
+  is killed and the stop carries on without it, so a script that hangs cannot
+  make a server impossible to stop. A non-zero exit is logged and treated the
+  same way.
+- It is staged into the server root beside the pre-start script, for the same
+  reason.
+- It is **not** run when a server is killed, nor when a stop arrives while the
+  pre-start commands are still running: there is no server to talk to yet, and
+  the run is simply ended.
+
+A pre-stop script is a better first attempt, not the only one. Keep a `stop`
+configured as well: it is what the daemon reaches for when the script fails,
+and what a crash-restart cycle or a node shutdown with a shorter deadline gets.
 
 #### Runtime names
 

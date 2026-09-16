@@ -61,6 +61,7 @@ func (s *Server) SyncWithEnvironment() {
 			e.SetPseudoConsole(meta.PseudoConsole)
 			e.SetConsole(meta.Console)
 			e.SetPreStartScript(meta.PreStartScript)
+			e.SetPreStopScript(meta.PreStopScript)
 			e.SetWorkingDir(meta.WorkingDir)
 		}
 	}

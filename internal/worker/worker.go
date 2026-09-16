@@ -1160,10 +1160,12 @@ func (w *Worker) UpdateLimits(l wire.Limits) error {
 
 // Stop brings the process down, escalating through the available mechanisms.
 //
-// The order matters and is not interchangeable. A stdin command is the only
-// mechanism most game servers actually implement; CTRL_BREAK reaches everything
-// sharing the console and is widely unhandled; terminating the job is immediate
-// and unclean. Each step is given the full timeout before the next is tried.
+// The order matters and is not interchangeable. The egg's pre-stop command, when
+// it has one, goes first, because it is the one mechanism written for this
+// particular server; a stdin command is the only generic mechanism most game
+// servers actually implement; CTRL_BREAK reaches everything sharing the console
+// and is widely unhandled; terminating the job is immediate and unclean. Each
+// step is given the full timeout before the next is tried.
 //
 // Every step is logged. A stop that goes wrong is close to impossible to
 // diagnose after the fact — the process is gone either way — so the log has to
@@ -1184,6 +1186,9 @@ func (w *Worker) Stop(p wire.Stop) {
 	}
 	pid := proc.Pid
 	overChannel := w.channelConfigured
+	// Running, as opposed to still in a pre-start command: the pre-stop
+	// script is for talking to a server, and there is not one yet.
+	running := w.state == wire.StateRunning
 	w.stopping = true
 	w.mu.Unlock()
 
@@ -1198,6 +1203,15 @@ func (w *Worker) Stop(p wire.Stop) {
 		"mode", string(p.Mode), "command", p.Value, "timeout", timeout.String(), "pid", pid)
 
 	w.setState(wire.StateStopping)
+
+	// The egg's own shutdown, ahead of anything generic. Where it works the
+	// server is gone before the switch below is reached; where it does not,
+	// nothing was lost but its timeout.
+	if p.PreStop != nil && len(p.PreStop.Argv) > 0 {
+		if w.runPreStop(p.PreStop, pid, running, timeout, started) {
+			return
+		}
+	}
 
 	switch p.Mode {
 	case wire.StopCommand:

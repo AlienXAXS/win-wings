@@ -81,6 +81,18 @@ type WindowsProfile struct {
 	// config file has to be rewritten from its egg variables on every boot is what
 	// it is for. Empty means none.
 	PreStartScript string `json:"pre_start_script"`
+
+	// PreStopScript is PowerShell run to completion when the server is asked to
+	// stop, before the stop mechanism above is tried, in the server's directory
+	// and under its own account.
+	//
+	// It is for the servers whose clean shutdown is neither a line on stdin nor
+	// a console interrupt: an RCON command, a call to a web endpoint, a save
+	// that has to be asked for first. The Linux eggs did this in a shell trap
+	// around the game. The script is given SERVER_PID; the server exiting during
+	// or after it is the stop succeeding, and otherwise the stop above follows
+	// as if the script had not run. Empty means none.
+	PreStopScript string `json:"pre_stop_script"`
 }
 
 // ConsoleProfile describes a server whose console is not its stdio.
