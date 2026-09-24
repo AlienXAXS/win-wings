@@ -1,0 +1,7 @@
+# The Startup page shows the egg's Linux startup line and a Docker image
+# selector. On a win-wings node the first may not be what runs and the second
+# does nothing, so the notice goes above both of them.
+Server:
+  Startup:
+    BeforeContent: 'WindowsStartupNotice'
+    AfterContent: ''

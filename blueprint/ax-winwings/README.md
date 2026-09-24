@@ -98,6 +98,22 @@ A node you have switched off by hand is never switched back on. The flag lives i
 this extension's own table — no column is added to `nodes`, so removal is clean
 and a panel upgrade cannot collide with it.
 
+## The Startup page
+
+The Panel's Startup page shows the egg's startup line and a Docker image
+selector, and on a Windows node neither is necessarily true. A notice above them
+(`components/WindowsStartupNotice.tsx`, fed by
+`GET /api/client/extensions/axwinwings/servers/{uuid}/startup`) says so:
+
+- **Profile replaces the command** — shows the Windows line that actually runs,
+  substituted the way the Panel substitutes its own (hidden variables stay
+  `[hidden]`; daemon-only ones such as `{{RUNTIME_PATH}}` are left as written).
+- **Profile leaves the command alone** — says the line shown is the one used.
+- **No enabled profile** — says the server cannot start until an admin sets one up.
+
+It renders nothing on any other node. The route checks `startup.read` on the
+server itself, since Blueprint gives extension routes no server binding.
+
 ## The egg gate
 
 Optional, and on by default. Creating a server on a Windows node with an egg that
