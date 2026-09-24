@@ -605,21 +605,26 @@ RemoteVulnerabilityPatch=1
 ## ---------------------------------------------------------------------------
 ## rcon-cli
 ##
+## Pinned to a release rather than resolved through the GitHub API: the asset
+## naming has changed between versions (the latest-release filter this used to
+## carry matched nothing and skipped the install without anyone noticing), and
+## pre-stop.ps1 depends on rcon.exe being here to shut the server down cleanly.
+##
 ## The Windows asset is a zip containing rcon.exe, not a tarball containing an
 ## executable bit. No chmod equivalent is needed or possible.
 ## ---------------------------------------------------------------------------
 
 Write-Section 'Installing rcon-cli...'
 
-$rconAsset = Get-LatestReleaseAsset -Repo 'gorcon/rcon-cli' `
-    -Filter { $_.name -match 'amd64_win(dows)?\.zip$' }
+$rconVersion = '0.10.3'
+$rconUrl     = "https://github.com/gorcon/rcon-cli/releases/download/v$rconVersion/rcon-$rconVersion-win64.zip"
+$rconZip     = Join-Path $TempDir "rcon-$rconVersion-win64.zip"
+$rconExtract = Join-Path $TempDir 'rcon-cli'
+$rconExe     = Join-Path $SteamRoot 'rcon.exe'
 
-if (-not $rconAsset) {
-    Write-Host 'Warning: no rcon-cli release asset found. Skipping rcon-cli install.'
-} else {
-    $rconZip     = Join-Path $TempDir $rconAsset.name
-    $rconExtract = Join-Path $TempDir 'rcon-cli'
-    Save-ReleaseAsset -Asset $rconAsset -Destination $rconZip
+try {
+    Write-Host "Downloading rcon-cli v$rconVersion from $rconUrl"
+    Get-RemoteFile -Uri $rconUrl -OutFile $rconZip -TimeoutSec 120
 
     Remove-Item $rconExtract -Recurse -Force -ErrorAction SilentlyContinue
     Expand-Archive -Path $rconZip -DestinationPath $rconExtract -Force
@@ -627,16 +632,21 @@ if (-not $rconAsset) {
     # The archive nests the binary inside a versioned directory.
     $rconBin = Get-ChildItem -Path $rconExtract -Filter 'rcon.exe' -Recurse -File |
         Select-Object -First 1
-    if ($rconBin) {
-        Copy-Item $rconBin.FullName (Join-Path $SteamRoot 'rcon.exe') -Force
-        Write-Host "rcon-cli installed to $SteamRoot\rcon.exe"
-        Write-Host 'Usage: .\rcon.exe -a 127.0.0.1:27015 -p yourpassword "command"'
-    } else {
-        Write-Host 'Warning: rcon.exe not found in the archive.'
-    }
-
+    if (-not $rconBin) { throw 'rcon.exe not found in the archive' }
+    Copy-Item $rconBin.FullName $rconExe -Force
+} catch {
+    Write-Host "Warning: rcon-cli install failed ($($_.Exception.Message))."
+    Write-Host '         Without rcon.exe the pre-stop script cannot ask the server to save'
+    Write-Host '         and exit, so stops will fall back to the daemon killing it.'
+} finally {
     Remove-Item $rconZip -Force -ErrorAction SilentlyContinue
     Remove-Item $rconExtract -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Decided from the filesystem, not from the download's exit path.
+if (Test-Path $rconExe) {
+    Write-Host "rcon-cli installed to $rconExe"
+    Write-Host 'Usage: .\rcon.exe -a "localhost:$env:RCON_PORT" -p "$env:RCON_PASSWORD" "command"'
 }
 
 ## ---------------------------------------------------------------------------

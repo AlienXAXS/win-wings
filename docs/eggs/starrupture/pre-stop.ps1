@@ -50,15 +50,16 @@ if (-not (Test-Path $RconExe)) {
     exit 1
 }
 
-Write-Host "Shutdown requested, sending RCON exit command to 127.0.0.1:$($env:RCON_PORT)..."
+Write-Host "Shutdown requested, sending RCON exit command to localhost:$($env:RCON_PORT)..."
 
 # Called as a statement so whatever rcon.exe says is visible. Its failure is
 # only in $LASTEXITCODE: a wrong password or a server that has not opened the
-# port yet both land here.
+# port yet both land here. The password is passed as one quoted string so a
+# value containing spaces reaches rcon.exe as a single argument.
 $previousEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
-    & $RconExe -a "127.0.0.1:$($env:RCON_PORT)" -p $env:RCON_PASSWORD 'exit'
+    & $RconExe -a "localhost:$($env:RCON_PORT)" -p "$($env:RCON_PASSWORD)" 'exit'
     $rconRc = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousEAP
