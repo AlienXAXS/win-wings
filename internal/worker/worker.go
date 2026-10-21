@@ -793,12 +793,28 @@ func (w *Worker) watchPreStart(p wire.Start, idx int, proc *winproc.Process, job
 		return
 	}
 
+	if code != 0 && p.PreStart[idx].Required {
+		// The egg's own script exits non-zero to say the server is not fit to
+		// start -- a check that failed, a config it could not write. Said on the
+		// console as well as the log, because the console is where an operator
+		// watching a server that never came up will look.
+		w.Log(wire.LogError, "a pre-start command failed; the server will not be started",
+			"command", preStartLabel(p.PreStart[idx]), "exit_code", code)
+		w.emitConsole([]byte(fmt.Sprintf("[win-wings] %s exited with code %d; "+
+			"the server will not be started\r\n", preStartLabel(p.PreStart[idx]), code)))
+		if token != 0 {
+			_ = token.Close()
+		}
+		// Through stopping, so that the daemon reads this as a start that was
+		// refused rather than a crash, and does not retry what just failed.
+		w.setState(wire.StateStopping)
+		w.finish(proc, job, code)
+		return
+	}
 	if code != 0 {
 		// The container entrypoint did not check either. A failed update
 		// usually leaves the previous files in place, and a server that starts
-		// stale is more useful than one that refuses to. The same reasoning covers
-		// an egg's preparation script: a config it failed to rewrite is a server
-		// with the old config, which the operator can see and fix.
+		// stale is more useful than one that refuses to.
 		w.Log(wire.LogWarn, "a pre-start command failed; continuing regardless",
 			"command", preStartLabel(p.PreStart[idx]), "exit_code", code)
 	} else {

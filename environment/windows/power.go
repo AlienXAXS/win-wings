@@ -307,11 +307,17 @@ func (e *Environment) Start(ctx context.Context) error {
 		return err
 	}
 
+	preStart, err := e.resolvePreStart(envVars)
+	if err != nil {
+		sawError = true
+		return err
+	}
+
 	if err := c.Start(wire.Start{
 		Argv:          argv,
 		Env:           envVars,
 		WorkingDir:    workingDir,
-		PreStart:      e.resolvePreStart(envVars),
+		PreStart:      preStart,
 		Limits:        e.Config().Limits().AsJobLimits(),
 		PseudoConsole: pty || console.PseudoConsole,
 		Cols:          console.Columns,

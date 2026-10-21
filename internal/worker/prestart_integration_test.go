@@ -153,3 +153,60 @@ func TestStopDuringPreStartSkipsTheServer(t *testing.T) {
 		return strings.Contains(col.consoleText(), "SECOND-RUN")
 	})
 }
+
+// A required pre-start command that exits non-zero must stop the run before the
+// server, and say so through stopping so the daemon does not read it as a crash.
+// One that is not required must not: that is the steamcmd update's contract.
+func TestRequiredPreStartFailureSkipsTheServer(t *testing.T) {
+	c, col, _ := startWorker(t, "prestart-required")
+
+	if err := c.Start(wire.Start{
+		PreStart: []wire.PreStartCommand{
+			{Argv: []string{comspec(), "/c", "exit 3"}, Label: "an optional step"},
+			{Argv: []string{comspec(), "/c", "exit 7"}, Label: "the egg's script", Required: true},
+		},
+		Argv:   []string{comspec(), "/c", "echo SERVER-RAN"},
+		Env:    os.Environ(),
+		Limits: wire.Limits{ProcessLimit: 32, MemoryBytes: 512 << 20},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitFor(t, 20*time.Second, "exit event", func() bool {
+		return col.exitCount() > 0
+	})
+
+	if out := col.consoleText(); strings.Contains(out, "SERVER-RAN") {
+		t.Errorf("the server ran after a required pre-start command failed: %q", out)
+	}
+
+	col.mu.Lock()
+	exit := col.exits[0]
+	states := append([]wire.ProcessState(nil), col.states...)
+	col.mu.Unlock()
+	t.Logf("state transitions: %v", states)
+
+	if exit.Code != 7 {
+		t.Errorf("exit code = %d, want the failed script's 7", exit.Code)
+	}
+	for i, s := range states {
+		if s == wire.StateRunning {
+			t.Errorf("reported running although the server was never started: %v", states)
+		}
+		if s == wire.StateOffline && (i == 0 || states[i-1] != wire.StateStopping) {
+			t.Errorf("went offline without passing through stopping: %v", states)
+		}
+	}
+
+	// The worker must be usable again afterwards.
+	if err := c.Start(wire.Start{
+		Argv:   []string{comspec(), "/c", "echo SECOND-RUN"},
+		Env:    os.Environ(),
+		Limits: wire.Limits{ProcessLimit: 32, MemoryBytes: 512 << 20},
+	}); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	waitFor(t, 15*time.Second, "second run output", func() bool {
+		return strings.Contains(col.consoleText(), "SECOND-RUN")
+	})
+}

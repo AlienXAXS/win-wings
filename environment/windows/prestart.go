@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"emperror.dev/errors"
 	"github.com/apex/log"
 
 	"github.com/pterodactyl/wings/internal/accounts"
@@ -25,16 +26,26 @@ const steamcmdExe = "steamcmd.exe"
 // own pre-start script goes second because what it almost always does is patch
 // one of those files with the server's variables, and a script that ran before
 // the update would have its work overwritten by it.
-func (e *Environment) resolvePreStart(envVars []string) []wire.PreStartCommand {
+//
+// The egg's script is required: the server does not start unless it exits
+// zero. The steamcmd update is not, because a failed update leaves the previous
+// files in place and a stale server is more use than a stopped one.
+func (e *Environment) resolvePreStart(envVars []string) ([]wire.PreStartCommand, error) {
 	var cmds []wire.PreStartCommand
 
 	if argv := e.resolveSteamUpdate(envVars); argv != nil {
 		cmds = append(cmds, wire.PreStartCommand{Argv: argv, Label: "the steamcmd update"})
 	}
-	if argv := e.resolveEggPreStart(); argv != nil {
-		cmds = append(cmds, wire.PreStartCommand{Argv: argv, Label: "this egg's pre-start script"})
+	argv, err := e.resolveEggPreStart()
+	if err != nil {
+		return nil, err
 	}
-	return cmds
+	if argv != nil {
+		cmds = append(cmds, wire.PreStartCommand{
+			Argv: argv, Label: "this egg's pre-start script", Required: true,
+		})
+	}
+	return cmds, nil
 }
 
 // resolveSteamUpdate returns the steamcmd update to run before the server, or
@@ -76,37 +87,29 @@ const preStartScriptName = "prestart.ps1"
 // resolveEggPreStart stages the egg's pre-start script and returns the command
 // that runs it, or nil when the egg has none.
 //
-// A failure here is reported and skipped rather than failing the boot. The
-// script is preparation, not the server: a config file that did not get rewritten
-// leaves a server running with its previous settings, which the operator can see
-// and fix, whereas refusing to start leaves them with a stopped server and a line
-// in a log they have to go looking for.
-func (e *Environment) resolveEggPreStart() []string {
+// A script that cannot be run fails the boot, as one that runs and fails does:
+// the server must not start without the preparation the egg asked for.
+func (e *Environment) resolveEggPreStart() ([]string, error) {
 	e.mu.RLock()
 	script := e.meta.PreStartScript
 	e.mu.RUnlock()
 
 	if strings.TrimSpace(script) == "" {
-		return nil
+		return nil, nil
 	}
 
 	path, err := e.stageScript(preStartScriptName, script)
 	if err != nil {
-		e.log().WithField("error", err).Error(
-			"could not stage this egg's pre-start script; the server is starting without it")
-		return nil
+		return nil, errors.WrapIf(err, "environment/windows: could not stage this egg's pre-start script")
 	}
 
 	powershell, err := winproc.PowerShellPath()
 	if err != nil {
-		e.log().WithField("error", err).Error(
-			"no PowerShell interpreter to run this egg's pre-start script; " +
-				"the server is starting without it")
-		return nil
+		return nil, errors.WrapIf(err, "environment/windows: no PowerShell interpreter to run this egg's pre-start script")
 	}
 
 	e.log().WithField("script", path).Info("running this egg's pre-start script before the server starts")
-	return winproc.PowerShellArgv(powershell, path)
+	return winproc.PowerShellArgv(powershell, path), nil
 }
 
 // stageScript writes an egg script where the server can read it but not write

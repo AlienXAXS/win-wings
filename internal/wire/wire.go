@@ -290,6 +290,9 @@ type PreStartCommand struct {
 	// Label names the command for the log, because Argv cannot be logged: a
 	// steamcmd update carries the account password in it.
 	Label string `json:"label,omitempty"`
+	// Required says the server must not start unless this command exits zero.
+	// Unset, a failure is logged and the run carries on to the next step.
+	Required bool `json:"required,omitempty"`
 }
 
 // ConsoleConfig describes where a run's console output comes from and where the
