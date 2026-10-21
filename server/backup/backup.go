@@ -7,7 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 
 	"emperror.dev/errors"
@@ -114,9 +114,9 @@ func (b *Backup) validateIdentifier() error {
 func (b *Backup) Path() string {
 	identifier, err := b.normalizedIdentifier()
 	if err != nil {
-		identifier = path.Base(b.Identifier())
+		identifier = filepath.Base(b.Identifier())
 	}
-	return path.Join(config.Get().System.BackupDirectory, identifier+".tar.gz")
+	return filepath.Join(config.Get().System.BackupDirectory, identifier+".tar.gz")
 }
 
 // Size returns the size of the generated backup.

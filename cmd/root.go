@@ -406,7 +406,7 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 	}
 
 	// Ensure the backup directory exists.
-	if err := os.MkdirAll(sys.BackupDirectory, 0o755); err != nil {
+	if err := sys.EnsureBackupDirectory(); err != nil {
 		log.WithField("error", err).Error("failed to create backup directory")
 	}
 

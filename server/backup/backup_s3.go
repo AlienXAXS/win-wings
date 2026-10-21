@@ -57,6 +57,11 @@ func (s *S3Backup) Generate(ctx context.Context, fsys *filesystem.Filesystem, ig
 	}
 	defer s.Remove()
 
+	// The archive is staged in the backup directory before it is uploaded.
+	if err := ensureBackupDirectory(); err != nil {
+		return nil, err
+	}
+
 	a := &filesystem.Archive{
 		Filesystem: fsys,
 		Ignore:     ignore,

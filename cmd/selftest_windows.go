@@ -3,6 +3,8 @@
 package cmd
 
 import (
+	"bytes"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
@@ -302,6 +304,12 @@ func runSelfTest(keep bool) error {
 		})
 	}
 
+	if !loaded {
+		s.skip("backup directory read/write", "the configuration did not load")
+	} else {
+		s.run("backup directory read/write", runBackupDirectoryCheck)
+	}
+
 	if root == "" {
 		s.skip("long path write", "no data directory")
 	} else {
@@ -384,6 +392,54 @@ func runSelfTest(keep bool) error {
 		fmt.Println("--keep was given: the test accounts and directories were left in place.")
 	}
 	return nil
+}
+
+// runBackupDirectoryCheck writes a file to the backup directory, reads it back
+// and compares, connecting to the share first when the directory is one.
+//
+// Several megabytes rather than a few bytes, so that a share that accepts
+// small writes and then fails or truncates larger ones — a full quota, a
+// flaky link — fails here rather than halfway through someone's backup.
+func runBackupDirectoryCheck() (string, error) {
+	sys := config.Get().System
+	dir := sys.BackupDirectory
+	if err := sys.EnsureBackupDirectory(); err != nil {
+		return "", err
+	}
+
+	want := make([]byte, 4<<20)
+	if _, err := rand.Read(want); err != nil {
+		return "", err
+	}
+	probe := filepath.Join(dir, ".winwings-selftest-backup")
+	defer os.Remove(probe)
+
+	start := time.Now()
+	if err := os.WriteFile(probe, want, 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", probe, err)
+	}
+	got, err := os.ReadFile(probe)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", probe, err)
+	}
+	elapsed := time.Since(start)
+	if !bytes.Equal(got, want) {
+		return "", fmt.Errorf("%s: read back %d bytes that differ from the %d written",
+			probe, len(got), len(want))
+	}
+	if err := os.Remove(probe); err != nil {
+		return "", fmt.Errorf("remove %s: %w", probe, err)
+	}
+
+	detail := fmt.Sprintf("%s (4 MiB round trip in %s)", dir, elapsed.Round(time.Millisecond))
+	if sys.BackupDirectoryIsShare() {
+		// This process is not the service. Credentials given in the config
+		// are the same either way, but a cmdkey entry or a credentials file
+		// the service account cannot read only shows up when the daemon runs.
+		detail += "\nSMB share, connected from this session; the service connects " +
+			"separately under its own account"
+	}
+	return detail, nil
 }
 
 // silentError suppresses cobra's usage output for a failure that is not a

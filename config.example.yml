@@ -49,6 +49,24 @@ system:
 
   archive_directory: C:\ProgramData\WinWings\archives
   backup_directory: C:\ProgramData\WinWings\backups
+
+  # Only used when backup_directory is a UNC path, e.g. \\nas\backups\node1,
+  # and ignored for a local one. The daemon runs in its own logon session, so a
+  # share mapped at the desktop is invisible to it; it connects with these
+  # instead, at boot and again before any backup if the share has gone away.
+  # A NAS that is down at boot is logged and does not stop the daemon.
+  #
+  # Either inline, or a credentials_file holding the same two keys (re-read on
+  # every connection, so a password can be changed without a restart). With
+  # neither, the daemon connects as its own account, which picks up anything
+  # stored for that account with cmdkey.
+  #
+  # `wings selftest` writes and reads back a file here to prove it works.
+  backup_share:
+    username: ""
+    password: ""
+    credentials_file: ""
+
   tmp_directory: C:\ProgramData\WinWings\tmp
 
   # IANA time zone name, e.g. Europe/London. Windows names its zones differently

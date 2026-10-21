@@ -132,7 +132,14 @@ type SystemConfiguration struct {
 	ArchiveDirectory string `default:"C:\\ProgramData\\WinWings\\archives" json:"-" yaml:"archive_directory"`
 
 	// Directory where local backups will be stored on the machine.
+	//
+	// A UNC path (\\server\share\...) puts backups on an SMB share; see
+	// BackupShare for how the daemon authenticates to it.
 	BackupDirectory string `default:"C:\\ProgramData\\WinWings\\backups" json:"-" yaml:"backup_directory"`
+
+	// BackupShare holds the credentials for a UNC BackupDirectory, and is
+	// ignored for any other path. Never sent by or to the Panel.
+	BackupShare BackupShareConfiguration `json:"-" yaml:"backup_share"`
 
 	// TmpDirectory specifies where temporary files for installation processes
 	// should be created.
@@ -538,8 +545,13 @@ func ConfigureDirectories() error {
 	}
 
 	log.WithField("path", _config.System.BackupDirectory).Debug("ensuring backup data directory exists")
-	if err := os.MkdirAll(_config.System.BackupDirectory, 0o700); err != nil {
-		return err
+	if err := _config.System.EnsureBackupDirectory(); err != nil {
+		// A NAS that is down must not keep every game server on the node from
+		// starting. Backups fail until it is back; each one reconnects first.
+		if !_config.System.BackupDirectoryIsShare() {
+			return err
+		}
+		log.WithField("error", err).Error("backup share is unavailable; backups will fail until it is reachable")
 	}
 
 	return nil

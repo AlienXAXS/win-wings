@@ -38,6 +38,9 @@ func LocateLocal(client remote.Client, uuid string) (*LocalBackup, os.FileInfo, 
 	if err := b.validateIdentifier(); err != nil {
 		return nil, nil, err
 	}
+	if err := ensureBackupDirectory(); err != nil {
+		return nil, nil, err
+	}
 	st, err := os.Stat(b.Path())
 	if err != nil {
 		return nil, nil, err
@@ -55,6 +58,9 @@ func (b *LocalBackup) Remove() error {
 	if err := b.validateIdentifier(); err != nil {
 		return err
 	}
+	if err := ensureBackupDirectory(); err != nil {
+		return err
+	}
 	return os.Remove(b.Path())
 }
 
@@ -67,6 +73,9 @@ func (b *LocalBackup) WithLogContext(c map[string]interface{}) {
 // defined location for this instance.
 func (b *LocalBackup) Generate(ctx context.Context, fsys *filesystem.Filesystem, ignore string) (*ArchiveDetails, error) {
 	if err := b.validateIdentifier(); err != nil {
+		return nil, err
+	}
+	if err := ensureBackupDirectory(); err != nil {
 		return nil, err
 	}
 	a := &filesystem.Archive{
@@ -93,6 +102,9 @@ func (b *LocalBackup) Restore(ctx context.Context, _ io.Reader, callback Restore
 	if err := b.validateIdentifier(); err != nil {
 		return err
 	}
+	if err := ensureBackupDirectory(); err != nil {
+		return err
+	}
 	f, err := os.Open(b.Path())
 	if err != nil {
 		return err
@@ -115,6 +127,16 @@ func (b *LocalBackup) Restore(ctx context.Context, _ io.Reader, callback Restore
 		return callback(f.NameInArchive, f.FileInfo, r)
 	}); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ensureBackupDirectory reconnects to the backup share if the directory is on
+// one and has become unreachable. For a local directory it only makes sure the
+// directory exists.
+func ensureBackupDirectory() error {
+	if err := config.Get().System.EnsureBackupDirectory(); err != nil {
+		return errors.WrapIf(err, "backup: backup directory is unavailable")
 	}
 	return nil
 }
